@@ -1,0 +1,2226 @@
+---
+title: "Natural killer cells associate with malignant epithelial cells in the pancreatic ductal adenocarcinoma tumor microenvironment"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries} 
+library(tidyverse)
+library(Seurat)
+library(imcRtools)
+library(SpatialExperiment)
+library(SingleCellExperiment)
+library(imcExperiment)
+library(cytomapper)
+library(dittoSeq)
+library(viridis)
+library(cowplot)
+library(ggforce)
+library(ComplexHeatmap)
+library(circlize)
+library(CellChat)
+library(scuttle)
+library(RColorBrewer)
+library(scales)
+library(CytoTRACE)
+library(clustree)
+library(mixtools)
+library(readr)
+library(tidyr)
+library(plyr)
+library(dplyr)
+library(PupillometryR)
+library(reshape2)
+library(pals)
+library(ggplot2)
+library(Hmisc)
+library(ggiraphExtra)
+library(diffcyt)
+library(ggvoronoi)
+library(ggpubr)
+library(multcomp)
+library(sf)
+library(clusterSim)
+library(stringr)
+library(igraph)
+library(readxl)
+library(packcircles)
+library(gridExtra)
+library(limma)
+library(qgraph)
+library(flowCore)
+library(data.table)
+library(ggraph)
+library(readxl)
+
+sessionInfo()
+```
+
+# Data transformation and munging for `PDAC_IMC` and `PDAC_sce` objects to generate figures within this manuscript
+## all datasets for downstream analyses are deposited at doi: 10.5281/zenodo.10582038
+```{r histoCAT-derived IMC single cell data transformation and munging}
+# Loading files and data munging 
+path <- "~/custom_gates_0"
+histoCAToutput <- list.files(path, pattern = ".csv")
+histoCAToutput
+
+# subset out PDAC patient samples from the pancreas TMA
+fileInfo <- read_xlsx(path = "~/pancreas_TMA_sample_info.xlsx") 
+tumorMeta <- subset(fileInfo, fileInfo$Tumor == "Yes") 
+head(unique(tumorMeta$Dx))
+tumorMeta <- subset(tumorMeta, tumorMeta$Dx == "Adenocarcinoma, ductal")
+tumorFiles <- intersect(histoCAToutput, paste0(tumorMeta$Image_Name, ".csv"))
+tumorFiles
+
+dataSet<-NULL
+for(i in 1:length(tumorFiles)){ 
+  message(i)
+  fpath <- paste0(path, tumorFiles[i])
+  message(fpath)
+  case1<-read.csv(fpath)
+  proteins<-colnames(case1)[grepl("Cell_",colnames(case1))] 
+  message(length(colnames(case1)[grepl("neighbour_4",colnames(case1))]))
+  neig<-colnames(case1)[grepl("neighbour_4",colnames(case1))][1:18] 
+  case1$ImageId <- tumorFiles[i] 
+  dataSet<-rbind.fill(dataSet,case1)
+}
+
+for (i in 1:length(rownames(dataSet))){
+  dataSet$TMA[i] <- unlist(strsplit(dataSet$ImageId[i], split = "_s0_", fixed = T))[1]
+}
+unique(dataSet$TMA)
+
+# Rename proteins for easier analysis and remove nuclear markers before transformation
+expr <- dataSet[,proteins]
+expr <- subset(expr, select = -c(Cell_DNA1_Ir191,
+                                 Cell_DNA2_Ir193))
+colnames(expr)
+
+rename(expr,
+       CD107a = Cell_CD107aLAMP1_Eu151,
+       CD11b = Cell_CD11b_Sm149,
+       CD16 = Cell_CD16_Nd146,
+       CD20 = Cell_CD20_Dy161,
+       CD3 = Cell_CD3_Er170,
+       CD45RO = Cell_CD45RO_Yb173,
+       CD4 = Cell_CD4_Gd156,
+       CD56 = Cell_CD56_Er166,
+       CD68 = Cell_CD68_Tb159,
+       CD69 = Cell_CD69_Yb174,
+       CD8a = Cell_CD8a_Dy162,
+       Ecadherin = Cell_Ecadherin_Gd158,
+       FAP = Cell_FAP_Eu153,
+       FoxP3 = Cell_FOXP3_Gd155,
+       HLA_A1 = Cell_HLAA1_Dy164,
+       HLA_ABC = Cell_HLAABC_Nd144,
+       IFNg = Cell_IFNgamma_Gd160,
+       Ki67 = Cell_Ki67_Er168,
+       MICA = Cell_MICA_Sm152,
+       NKG2D = Cell_NKG2DCD314_Lu175,
+       NKp44 = Cell_NKp44_Nd145,
+       PCNA = Cell_PCNA_Sm147,
+       PD1 = Cell_PD1_Ho165,
+       PDL1 = Cell_PDL1_Nd150,
+       TGFb = Cell_TGFbeta1_Dy163,
+       aSMA = Cell_aSMA_Pr141,
+       cl_caspase_3 = Cell_clcaspase3_Yb172,
+       collagen_I = Cell_colltype1_Tm169,
+       granzyme_B = Cell_granzymeB_Er167,
+       pankeratin = Cell_pankeratin_Nd148,
+       perforin = Cell_perforin_Yb176,
+       vimentin = Cell_vimentin_Nd143)
+
+# Data Transformation method: (log + 0.01)
+expr_log <- log((expr) + 0.01) 
+
+# Create Seurat Objects 
+rownames(expr_log) <- paste0(dataSet$ImageId, "_", dataSet$CellId)
+head(rownames(expr_log))
+seur_log <- CreateSeuratObject(counts = t(expr_log))
+seur_log$imageID <- dataSet$ImageId
+seur_log$TMA <- dataSet$TMA
+
+# Generating UMAPs and heatmaps from transformed data to determine batch effects from data transformation
+seur_log <- FindVariableFeatures(seur_log)
+seur_log <- ScaleData(seur_log)
+seur_log <- RunPCA(seur_log, approx = F, verbose = F)
+ElbowPlot(seur_log)
+
+seur_log <- FindNeighbors(seur_log, reduction = "pca")
+seur_log <- FindClusters(seur_log)
+seur_log <- RunUMAP(seur_log, dims = 1:20, n.components = 3L)
+seur_log_cl_umap <- DimPlot(seur_log, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+seur_log_id_umap <- DimPlot(seur_log, reduction = "umap", group.by = c("ImageId"), label = T) + NoLegend()
+seur_log_tma_umap <- DimPlot(seur_log, reduction = "umap", group.by = c("TMA"), label = T)
+plot_grid(plotlist = list(seur_log_cl_umap, seur_log_id_umap, seur_log_tma_umap), labels = "AUTO", ncol = 3)
+
+seur_log <- RunUMAP(seur_log, dims = 1:20, n.components = 2L)
+seur_log_cl_umap <- DimPlot(seur_log, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+seur_log_id_umap <- DimPlot(seur_log, reduction = "umap", group.by = c("ImageId"), label = T) + NoLegend()
+seur_log_tma_umap <- DimPlot(seur_log, reduction = "umap", group.by = c("TMA"), label = T)
+plot_grid(plotlist = list(seur_log_cl_umap, seur_log_id_umap, seur_log_tma_umap), labels = "AUTO", ncol = 3)
+```
+
+```{r PDAC IMC single cell data integration}
+options(future.globals.maxSize = 4000 * 1024^2) 
+
+# Split dataset by ROI ("ImageId") and re-integrate using variance stabilization & anchor-based integration 
+roi.list_log <- SplitObject(seur_log, split.by = "ImageId")
+length(roi.list_log)
+
+# Defining features for each transformed dataset
+roiint.features_log <- SelectIntegrationFeatures(
+  object.list = roi.list_log,
+  nfeatures = length(rownames(seur_log)))
+
+# Finding integration anchors for each transformed dataset
+roiint.anchors_log <- FindIntegrationAnchors(
+  object.list = roi.list_log,
+  normalization.method = "LogNormalize",
+  anchor.features = roiint.features_log,
+  reduction = "rpca",
+  k.anchor = 20,
+  verbose = TRUE)
+
+# Integrate data for each transformed dataset  
+roiint_log <- IntegrateData(
+  anchorset = roiint.anchors_log,
+  verbose = TRUE)
+```
+
+```{r PDAC IMC single cell re-integrated data clustering}
+# To determine cell phenotype, using these markers to differentiate immune cells, epithelial cells, and fibroblasts
+features <- c("pankeratin",
+              "CD45RO",
+              "CD16",
+              "CD56",
+              "NKp44",
+              "NKG2D",
+              "CD3",
+              "CD4",
+              "CD8a",
+              "FoxP3",
+              "CD11b",
+              "CD68",
+              "CD20",
+              "aSMA",
+              "FAP",
+              "vimentin",
+              "Ecadherin")
+
+# Selecting 'integrated' assay and performing PCA analysis
+DefaultAssay(roiint_log) <- "integrated"
+roiint_log <- ScaleData(roiint_log, verbose = T)
+roiint_log <- RunPCA(roiint_log, features = features, approx = F, verbose = T, npcs = 17) 
+ElbowPlot(roiint_log, ndims = 17)
+
+# Visualizing integrated results per dataset 
+## Default clustering resolution
+roiint_log <- FindNeighbors(roiint_log, features = features, reduction = "pca")
+roiint_log <- FindClusters(roiint_log)
+
+roiint_log <- RunUMAP(roiint_log, features = features, n.components = 2L)
+roiint_log_cl_umap <- DimPlot(roiint_log, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+roiint_log_id_umap <- DimPlot(roiint_log, reduction = "umap", group.by = c("ImageId"), label = T) + NoLegend()
+roiint_log_tma_umap <- DimPlot(roiint_log, reduction = "umap", group.by = c("TMA"), label = T)
+
+plot_grid(plotlist = list(roiint_log_cl_umap, roiint_log_id_umap, roiint_log_tma_umap), labels = "AUTO", ncol = 3)
+
+Idents(roiint_log) <- roiint_log$seurat_clusters
+clusterMarkers <- FindAllMarkers(roiint_log, 
+                                 assay = "integrated", 
+                                 logfc.threshold = 0, 
+                                 test.use = "roc")
+
+# Determining optimal clustering resolution by setting resolution = 0.1-0.6 in 0.05 increments
+roiint_log <- FindNeighbors(roiint_log, features = features, reduction = "pca")
+roiint_res_log <- FindClusters(roiint_log, resolution = c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6)) clustree(roiint_res_log) # visualing clustree 
+
+roiint_res_log <- RunUMAP(roiint_res_log, features = features, n.components = 2L)
+
+roiint_res_log_cl_umap <- DimPlot(roiint_res_log, reduction = "umap", group.by = c("seurat_clusters"), label = T)
+roiint_res_log_id_umap <- DimPlot(roiint_res_log, reduction = "umap", group.by = c("ImageId"), label = T) + NoLegend()
+roiint_res_log_tma_umap <- DimPlot(roiint_res_log, reduction = "umap", group.by = c("TMA"), label = T)
+
+roiint_res_log_0.35_umap <- DimPlot(roiint_res_log, reduction = "umap", label = TRUE, group.by = "integrated_snn_res.0.35")
+roiint_res_log_0.35_umap
+
+Idents(roiint_res_log) <- roiint_res_log$integrated_snn_res.0.35
+clusterMarkers_res_log <- FindAllMarkers(roiint_res_log, 
+                                         assay = "integrated", 
+                                         logfc.threshold = 0, 
+                                         test.use = "roc")
+topMarkers_res_log <- clusterMarkers_res_log %>% 
+  group_by(cluster) %>% 
+  top_n(wt = power, n = 10)
+
+topMarkerHeatmap_res_log_0.35 <- DoHeatmap(roiint_res_log, 
+                                           features = topMarkers_res_log$gene, 
+                                           draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap_res_log_0.35
+
+topMarkerHeatmap_res_log_0.35_feat <- DoHeatmap(roiint_res_log, 
+                                                features = features, 
+                                                draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap_res_log_0.35_feat
+
+topMarkerHeatmap_res_log_0.35_all <- DoHeatmap(roiint_res_log,
+                                                draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap_res_log_0.35_all
+## repeated lines 247-275 for UMAP and heatmap visualizations from all clustering resolutions. Clustering resolution = 0.35 was the most representative of this dataset.
+```
+
+```{r PDAC IMC single cell annotation}
+# Set up Seurat object to rename clusters by cell type
+Idents(roiint_log) <- roiint_log@meta.data$integrated_snn_res.0.35
+
+## relabeling clusters to main cell types
+roiint_log <- RenameIdents(roiint_log,
+                           c("0" = "epithelial",
+                             "1" = "aSMA+ fibroblast",
+                             "2" = "epithelial",
+                             "3" = "macrophage",
+                             "4" = "aSMA+ fibroblast",
+                             "5" = "NK cell",
+                             "6" = "CD4+ T cell",
+                             "7" = "CD8+ T cell",
+                             "8" = "B cell",
+                             "9" = "FAP+ fibroblast",
+                             "10" = "CD4+ T cell",
+                             "11" = "NK cell"))
+
+roiint_log$cellType <- Idents(roiint_log)
+```
+
+```{r PDAC IMC subclustering}
+# subclustering cell types using remaining markers from IMC panel to assess the functional status of each cell type
+features <- c("granzyme-B",
+              "IFNg",
+              "TGFb",
+              "Ki67",
+              "CD107a",
+              "perforin",
+              "PCNA",
+              "CD69",
+              "cl-caspase-3",
+              "collagen-I",
+              "MICA",
+              "PDL1",
+              "PD1",
+              "HLA-ABC",
+              "HLA-A1")
+
+Idents(roiint_log) = roiint_log@meta.data$cellType
+levels(roiint_log) # determine if appropriate clusters were pulled
+
+###### aSMA+ fibroblasts ######
+sub_asma <- subset(x = roiint_log, idents = c("1", "4"))
+levels(sub_asma)
+
+DefaultAssay(sub_asma) <- "integrated"
+sub_asma <- ScaleData(sub_asma, verbose = T)
+sub_asma <- RunPCA(sub_asma, features = features, approx = F, verbose = T)
+ElbowPlot(sub_asma)
+
+sub_asma <- FindNeighbors(sub_asma, features = features, reduction = "pca")
+sub_asma_res <- FindClusters(sub_asma, resolution = c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35))
+cl_0 <- clustree(sub_asma_res)
+
+sub_asma_res <- RunUMAP(sub_asma_res, features = features, n.components = 2L)
+
+roiint_res_log_cl_umap <- DimPlot(sub_asma_res, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+roiint_res_log_id_umap <- DimPlot(sub_asma_res, reduction = "umap", group.by = c("ImageId"), label = T) + NoLegend()
+roiint_res_log_tma_umap <- DimPlot(sub_asma_res, reduction = "umap", group.by = c("TMA"), label = T)
+
+roiint_res_log_0.15_umap <- DimPlot(sub_asma_res, reduction = "umap", label = TRUE, group.by = "integrated_snn_res.0.15")
+
+Idents(sub_asma_res) <- sub_asma_res$integrated_snn_res.0.15
+clusterMarkers <- FindAllMarkers(sub_asma_res, 
+                                 assay = "integrated", 
+                                 logfc.threshold = 0, 
+                                 test.use = "roc")
+topMarkers <- clusterMarkers %>% 
+  group_by(cluster) %>% 
+  top_n(wt = power, n = 10)
+
+topMarkerHeatmap <- DoHeatmap(sub_asma_res,  
+                              draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap
+## repeated lines 340-354 for UMAP and heatmap visualizations from all clustering resolutions. Clustering resolution = 0.15 was the most representative of this dataset.
+
+##### B cells #####
+sub_b <- subset(x = roiint_log, idents = c("8"))
+levels(sub_b)
+
+DefaultAssay(sub_b) <- "integrated"
+sub_b <- ScaleData(sub_b, verbose = T)
+sub_b <- RunPCA(sub_b, features = features, approx = F, verbose = T)
+ElbowPlot(sub_b)
+
+sub_b <- FindNeighbors(sub_b, features = features, reduction = "pca")
+sub_b_res <- FindClusters(sub_b, resolution = c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35))
+cl_0 <- clustree(sub_b_res)
+cl_0
+
+sub_b_res <- RunUMAP(sub_b_res, features = features, n.components = 2L)
+
+roiint_res_log_cl_umap <- DimPlot(sub_b_res, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+roiint_res_log_id_umap <- DimPlot(sub_b_res, reduction = "umap", group.by = c("imageID"), label = T) + NoLegend()
+roiint_res_log_tma_umap <- DimPlot(sub_b_res, reduction = "umap", group.by = c("TMA"), label = T)
+
+roiint_res_log_0.25_umap <- DimPlot(sub_b_res, reduction = "umap", label = TRUE, group.by = "integrated_snn_res.0.25")
+
+Idents(sub_b_res) <- sub_b_res$integrated_snn_res.0.25
+clusterMarkers <- FindAllMarkers(sub_b_res,
+                                 assay = "integrated",
+                                 logfc.threshold = 0,
+                                 test.use = "roc")
+topMarkers <- clusterMarkers %>%
+  group_by(cluster) %>%
+  top_n(wt = power, n = 10)
+
+topMarkerHeatmap <- DoHeatmap(sub_b_res,
+                              draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap
+## repeated lines 377-391 for UMAP and heatmap visualizations from all clustering resolutions. Clustering resolution = 0.25 was the most representative of this dataset.
+
+##### CD4+ T cells #####
+sub_t4 <- subset(x = roiint_log, idents = c("6", "10"))
+levels(sub_t4)
+
+DefaultAssay(sub_t4) <- "integrated"
+sub_t4 <- ScaleData(sub_t4, verbose = T)
+sub_t4 <- RunPCA(sub_t4, features = features, approx = F, verbose = T)
+ElbowPlot(sub_t4)
+
+sub_t4 <- FindNeighbors(sub_t4, features = features, reduction = "pca")
+sub_t4_res <- FindClusters(sub_t4, resolution = c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35))
+cl_0 <- clustree(sub_t4_res)
+cl_0
+
+sub_t4_res <- RunUMAP(sub_t4_res, features = features, n.components = 2L)
+
+roiint_res_log_cl_umap <- DimPlot(sub_t4_res, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+roiint_res_log_id_umap <- DimPlot(sub_t4_res, reduction = "umap", group.by = c("imageID"), label = T) + NoLegend()
+roiint_res_log_tma_umap <- DimPlot(sub_t4_res, reduction = "umap", group.by = c("TMA"), label = T)
+
+roiint_res_log_0.10_umap <- DimPlot(sub_t4_res, reduction = "umap", label = TRUE, group.by = "integrated_snn_res.0.1")
+
+Idents(sub_t4_res) <- sub_t4_res$integrated_snn_res.0.1
+clusterMarkers <- FindAllMarkers(sub_t4_res, 
+                                 assay = "integrated", 
+                                 logfc.threshold = 0, 
+                                 test.use = "roc")
+topMarkers <- clusterMarkers %>% 
+  group_by(cluster) %>% 
+  top_n(wt = power, n = 10)
+
+topMarkerHeatmap <- DoHeatmap(sub_t4_res,  
+                              draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap
+## repeated lines 414-428 for UMAP and heatmap visualizations from each clustering resolution. Clustering resolution = 0.1 was the most representative of this dataset.
+
+##### CD8+ T cells #####
+sub_t8 <- subset(x = roiint_log, idents = c("7"))
+levels(sub_t8)
+table(Idents(sub_t8)) # compare number of cells to cluster from original object
+
+DefaultAssay(sub_t8) <- "integrated"
+sub_t8 <- ScaleData(sub_t8, verbose = T)
+sub_t8 <- RunPCA(sub_t8, features = features, approx = F, verbose = T)
+ElbowPlot(sub_t8)
+
+sub_t8 <- FindNeighbors(sub_t8, features = features, reduction = "pca")
+sub_t8_res <- FindClusters(sub_t8, resolution = c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35))
+cl_0 <- clustree(sub_t8_res)
+cl_0
+
+sub_t8_res <- RunUMAP(sub_t8_res, features = features, n.components = 2L)
+
+roiint_res_log_cl_umap <- DimPlot(sub_t8_res, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+roiint_res_log_id_umap <- DimPlot(sub_t8_res, reduction = "umap", group.by = c("imageID"), label = T) + NoLegend()
+roiint_res_log_tma_umap <- DimPlot(sub_t8_res, reduction = "umap", group.by = c("TMA"), label = T)
+
+roiint_res_log_0.15_umap <- DimPlot(sub_t8_res, reduction = "umap", label = TRUE, group.by = "integrated_snn_res.0.15")
+
+Idents(sub_t8_res) <- sub_t8_res$integrated_snn_res.0.15
+clusterMarkers <- FindAllMarkers(sub_t8_res, 
+                                 assay = "integrated", 
+                                 logfc.threshold = 0, 
+                                 test.use = "roc")
+topMarkers <- clusterMarkers %>% 
+  group_by(cluster) %>% 
+  top_n(wt = power, n = 10)
+
+topMarkerHeatmap <- DoHeatmap(sub_t8_res,  
+                              draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap
+## repeated lines 452-466 for UMAP and heatmap visualizations from all clustering resolutions. Clustering resolution = 0.15 was the most representative of this dataset.
+
+##### epithelial cells #####
+sub_epi <- subset(x = roiint_log, idents = c("0", "2"))
+levels(sub_epi)
+table(Idents(sub_epi)) # compare number of cells to cluster from original object
+
+DefaultAssay(sub_epi) <- "integrated"
+sub_epi <- ScaleData(sub_epi, verbose = T)
+sub_epi <- RunPCA(sub_epi, features = features, approx = F, verbose = T)
+ElbowPlot(sub_epi)
+
+sub_epi <- FindNeighbors(sub_epi, features = features, reduction = "pca")
+sub_epi_res <- FindClusters(sub_epi, resolution = c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35))
+cl_0 <- clustree(sub_epi_res)
+cl_0
+
+sub_epi_res <- RunUMAP(sub_epi_res, features = features, n.components = 2L)
+
+roiint_res_log_cl_umap <- DimPlot(sub_epi_res, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+roiint_res_log_id_umap <- DimPlot(sub_epi_res, reduction = "umap", group.by = c("imageID"), label = T) + NoLegend()
+roiint_res_log_tma_umap <- DimPlot(sub_epi_res, reduction = "umap", group.by = c("TMA"), label = T)
+
+roiint_res_log_0.20_umap <- DimPlot(sub_epi_res, reduction = "umap", label = TRUE, group.by = "integrated_snn_res.0.2")
+
+Idents(sub_epi_res) <- sub_epi_res$integrated_snn_res.0.2
+clusterMarkers <- FindAllMarkers(sub_epi_res,
+                                 assay = "integrated",
+                                 logfc.threshold = 0,
+                                 test.use = "roc")
+topMarkers <- clusterMarkers %>%
+  group_by(cluster) %>%
+  top_n(wt = power, n = 10)
+
+topMarkerHeatmap <- DoHeatmap(sub_epi_res,
+                              draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap
+## repeated lines 490-504 for UMAP and heatmap visualizations from all clustering resolutions. Clustering resolution = 0.2 was the most representative of this dataset.
+
+##### FAP+ fibroblasts #####
+sub_fap <- subset(x = roiint_log, idents = c("9"))
+levels(sub_fap)
+table(Idents(sub_fap)) # compare number of cells to cluster from original object
+
+DefaultAssay(sub_fap) <- "integrated"
+sub_fap <- ScaleData(sub_fap, verbose = T)
+sub_fap <- RunPCA(sub_fap, features = features, approx = F, verbose = T)
+ElbowPlot(sub_fap)
+
+sub_fap <- FindNeighbors(sub_fap, features = features, reduction = "pca")
+sub_fap_res <- FindClusters(sub_fap, resolution = c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35))
+cl_0 <- clustree(sub_fap_res)
+cl_0
+
+sub_fap_res <- RunUMAP(sub_fap_res, features = features, n.components = 2L)
+
+roiint_res_log_cl_umap <- DimPlot(sub_fap_res, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+roiint_res_log_id_umap <- DimPlot(sub_fap_res, reduction = "umap", group.by = c("imageID"), label = T) + NoLegend()
+roiint_res_log_tma_umap <- DimPlot(sub_fap_res, reduction = "umap", group.by = c("TMA"), label = T)
+
+roiint_res_log_0.15_umap <- DimPlot(sub_fap_res, reduction = "umap", label = TRUE, group.by = "integrated_snn_res.0.15")
+
+Idents(sub_fap_res) <- sub_fap_res$integrated_snn_res.0.15
+clusterMarkers <- FindAllMarkers(sub_fap_res, 
+                                 assay = "integrated", 
+                                 logfc.threshold = 0, 
+                                 test.use = "roc")
+topMarkers <- clusterMarkers %>% 
+  group_by(cluster) %>% 
+  top_n(wt = power, n = 10)
+
+topMarkerHeatmap <- DoHeatmap(sub_fap_res,  
+                              draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap
+## repeated lines 528-542 for UMAP and heatmap visualizations from all clustering resolutions. Clustering resolution = 0.15 was the most representative of this dataset.
+
+##### macrophage #####
+sub_macro <- subset(x = roiint_log, idents = c("3"))
+levels(sub_macro)
+table(Idents(sub_macro)) # compare number of cells to cluster from original object
+
+DefaultAssay(sub_macro) <- "integrated"
+sub_macro <- ScaleData(sub_macro, verbose = T)
+sub_macro <- RunPCA(sub_macro, features = features, approx = F, verbose = T)
+ElbowPlot(sub_macro)
+
+sub_macro <- FindNeighbors(sub_macro, features = features, reduction = "pca")
+sub_macro_res <- FindClusters(sub_macro, resolution = c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35))
+cl_0 <- clustree(sub_macro_res)
+cl_0
+
+sub_macro_res <- RunUMAP(sub_macro_res, features = features, n.components = 2L)
+
+roiint_res_log_cl_umap <- DimPlot(sub_macro_res, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+roiint_res_log_id_umap <- DimPlot(sub_macro_res, reduction = "umap", group.by = c("imageID"), label = T) + NoLegend()
+roiint_res_log_tma_umap <- DimPlot(sub_macro_res, reduction = "umap", group.by = c("TMA"), label = T)
+
+roiint_res_log_0.10_umap <- DimPlot(sub_macro_res, reduction = "umap", label = TRUE, group.by = "integrated_snn_res.0.1")
+
+Idents(sub_macro_res) <- sub_macro_res$integrated_snn_res.0.1
+clusterMarkers <- FindAllMarkers(sub_macro_res, 
+                                 assay = "integrated", 
+                                 logfc.threshold = 0, 
+                                 test.use = "roc")
+topMarkers <- clusterMarkers %>% 
+  group_by(cluster) %>% 
+  top_n(wt = power, n = 10)
+
+topMarkerHeatmap <- DoHeatmap(sub_macro_res,  
+                              draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap
+## repeated lines 566-580 for UMAP and heatmap visualizations from all clustering resolutions. Clustering resolution = 0.1 was the most representative of the dataset
+
+##### NK cells #####
+sub_NK <- subset(x = roiint_log, idents = c("5", "11"))
+levels(sub_NK)
+table(Idents(sub_NK)) # compare number of cells to cluster from original object
+
+DefaultAssay(sub_NK) <- "integrated"
+sub_NK <- ScaleData(sub_NK, verbose = T)
+sub_NK <- RunPCA(sub_NK, features = features, approx = F, verbose = T)
+ElbowPlot(sub_NK)
+
+sub_NK <- FindNeighbors(sub_NK, features = features, reduction = "pca")
+sub_NK_res <- FindClusters(sub_NK, resolution = c(0.1, 0.15, 0.2, 0.25, 0.3, 0.35))
+cl_0 <- clustree(sub_NK_res)
+cl_0
+
+sub_NK_res <- RunUMAP(sub_NK_res, features = features, n.components = 2L)
+
+roiint_res_log_cl_umap <- DimPlot(sub_NK_res, reduction = "umap", group.by = c("seurat_clusters"), label = T) 
+roiint_res_log_id_umap <- DimPlot(sub_NK_res, reduction = "umap", group.by = c("imageID"), label = T) + NoLegend()
+roiint_res_log_tma_umap <- DimPlot(sub_NK_res, reduction = "umap", group.by = c("TMA"), label = T)
+
+roiint_res_log_0.20_umap <- DimPlot(sub_NK_res, reduction = "umap", label = TRUE, group.by = "integrated_snn_res.0.2")
+
+Idents(sub_NK_res) <- sub_NK_res$integrated_snn_res.0.2
+clusterMarkers <- FindAllMarkers(sub_NK_res,
+                                 assay = "integrated",
+                                 logfc.threshold = 0,
+                                 test.use = "roc")
+topMarkers <- clusterMarkers %>%
+  group_by(cluster) %>%
+  top_n(wt = power, n = 10)
+
+topMarkerHeatmap <- DoHeatmap(sub_NK_res,
+                              draw.lines = T) +
+  scale_fill_gradientn(colors = c("blue", "white", "red"))
+topMarkerHeatmap
+## repeated lines 604-618 for UMAP and heatmap visualizations from all clustering resolutions. Clustering resolution = 0.2 was the most representative of this dataset.
+########
+
+# Renaming clusters from main Seurat roiint_log object and from subsetted Seurat roiint_log objects to add subsetted metadata into main Seurat roiint_log object
+## load Seurat object and set the active ident to the resolution of interest and confirm the clusters/cell numbers
+Idents(roiint_log$cellType)
+levels(roiint_log) # determine if appropriate clusters were pulled
+table(Idents(roiint_log)) 
+
+## run subclustering, and then pull those labels into a new dataframe
+### aSMA fibroblasts
+newdf_asma <- data.frame(sub_asma_res$integrated_snn_res.0.15, row.names = colnames(sub_asma_res)) # epithelial
+colnames(newdf_asma) <- c("subclustering_asma")
+
+#### make a dataframe with all cells in original roiint_log object, to merge subcluster info into
+df <- data.frame(roiint_log$cellType, row.names = colnames(roiint_log))
+length(unique(df$roiint_log.meta.data.integrated_snn_res.0.35))
+
+#### merge the two dataframes you made
+metaMerge <- merge(df, newdf_asma, by.x = "row.names", by.y = "row.names", all.x = T)
+metaMerge$subclustering_asma <- as.character(metaMerge$subclustering_asma)
+rownames(metaMerge) <- metaMerge$Row.names
+metaMerge$Row.names <- NULL
+metaMerge$roiint_log.meta.data.integrated_snn_res.0.35 <- NULL
+roiint_log <- AddMetaData(roiint_log, metadata = metaMerge)
+
+## repeat for other subclusters
+### B cells
+newdf_b <- data.frame(sub_b_res$integrated_snn_res.0.25, row.names = colnames(sub_b_res)) # epithelial
+colnames(newdf_b) <- c("subclustering_b")
+
+#### make a dataframe with all cells in original roiint_log object, to merge subcluster info into
+df <- data.frame(roiint_log$cellType, row.names = colnames(roiint_log))
+length(unique(df$roiint_log.meta.data.integrated_snn_res.0.35))
+
+#### merge the two dataframes you made
+metaMerge <- merge(df, newdf_b, by.x = "row.names", by.y = "row.names", all.x = T)
+metaMerge$subclustering_b <- as.character(metaMerge$subclustering_b)
+rownames(metaMerge) <- metaMerge$Row.names
+metaMerge$Row.names <- NULL
+metaMerge$roiint_log.meta.data.integrated_snn_res.0.35 <- NULL
+roiint_log <- AddMetaData(roiint_log, metadata = metaMerge)
+
+### epithelial cells
+newdf_epi <- data.frame(sub_epi_res$integrated_snn_res.0.2, row.names = colnames(sub_epi_res)) # epithelial
+colnames(newdf_epi) <- c("subclustering_epi")
+
+#### make a dataframe with all cells in original roiint_log object, to merge subcluster info into
+df <- data.frame(roiint_log$cellType, row.names = colnames(roiint_log))
+length(unique(df$roiint_log.meta.data.integrated_snn_res.0.35))
+
+#### merge the two dataframes you made
+metaMerge <- merge(df, newdf_epi, by.x = "row.names", by.y = "row.names", all.x = T)
+metaMerge$subclustering_epi <- as.character(metaMerge$subclustering_epi)
+rownames(metaMerge) <- metaMerge$Row.names
+metaMerge$Row.names <- NULL
+metaMerge$roiint_log.meta.data.integrated_snn_res.0.35 <- NULL
+roiint_log <- AddMetaData(roiint_log, metadata = metaMerge)
+
+### FAP+ fibroblasts
+newdf_fap <- data.frame(sub_fap_res$integrated_snn_res.0.15, row.names = colnames(sub_fap_res)) # epithelial
+colnames(newdf_fap) <- c("subclustering_fap")
+
+#### make a dataframe with all cells in original roiint_log object, to merge subcluster info into
+df <- data.frame(roiint_log$cellType, row.names = colnames(roiint_log))
+length(unique(df$roiint_log.meta.data.integrated_snn_res.0.35))
+
+#### merge the two dataframes you made
+metaMerge <- merge(df, newdf_fap, by.x = "row.names", by.y = "row.names", all.x = T)
+metaMerge$subclustering_fap <- as.character(metaMerge$subclustering_fap)
+rownames(metaMerge) <- metaMerge$Row.names
+metaMerge$Row.names <- NULL
+metaMerge$roiint_log.meta.data.integrated_snn_res.0.35 <- NULL
+roiint_log <- AddMetaData(roiint_log, metadata = metaMerge)
+
+### macrophages
+newdf_macro <- data.frame(sub_macro_res$integrated_snn_res.0.1, row.names = colnames(sub_macro_res)) # epithelial
+colnames(newdf_macro) <- c("subclustering_macro")
+
+#### make a dataframe with all cells in original roiint_log object, to merge subcluster info into
+df <- data.frame(roiint_log$cellType, row.names = colnames(roiint_log))
+length(unique(df$roiint_log.meta.data.integrated_snn_res.0.35))
+
+#### merge the two dataframes you made
+metaMerge <- merge(df, newdf_macro, by.x = "row.names", by.y = "row.names", all.x = T)
+metaMerge$subclustering_macro <- as.character(metaMerge$subclustering_macro)
+rownames(metaMerge) <- metaMerge$Row.names
+metaMerge$Row.names <- NULL
+metaMerge$roiint_log.meta.data.integrated_snn_res.0.35 <- NULL
+roiint_log <- AddMetaData(roiint_log, metadata = metaMerge)
+
+### NK cells
+newdf_NK <- data.frame(sub_NK_res$integrated_snn_res.0.2, row.names = colnames(sub_NK_res)) # epithelial
+colnames(newdf_NK) <- c("subclustering_NK")
+
+#### make a dataframe with all cells in original roiint_log object, to merge subcluster info into
+df <- data.frame(roiint_log$cellType, row.names = colnames(roiint_log))
+length(unique(df$roiint_log.meta.data.integrated_snn_res.0.35))
+
+#### merge the two dataframes you made
+metaMerge <- merge(df, newdf_NK, by.x = "row.names", by.y = "row.names", all.x = T)
+metaMerge$subclustering_NK <- as.character(metaMerge$subclustering_NK)
+rownames(metaMerge) <- metaMerge$Row.names
+metaMerge$Row.names <- NULL
+metaMerge$roiint_log.meta.data.integrated_snn_res.0.35 <- NULL
+roiint_log <- AddMetaData(roiint_log, metadata = metaMerge)
+
+### CD4+ T cells
+newdf_t4 <- data.frame(sub_t4_res$integrated_snn_res.0.1, row.names = colnames(sub_t4_res)) # epithelial
+colnames(newdf_t4) <- c("subclustering_t4")
+
+#### make a dataframe with all cells in original roiint_log object, to merge subcluster info into
+df <- data.frame(roiint_log$cellType, row.names = colnames(roiint_log))
+length(unique(df$roiint_log.meta.data.integrated_snn_res.0.35))
+
+#### merge the two dataframes you made
+metaMerge <- merge(df, newdf_t4, by.x = "row.names", by.y = "row.names", all.x = T)
+metaMerge$subclustering_t4 <- as.character(metaMerge$subclustering_t4)
+rownames(metaMerge) <- metaMerge$Row.names
+metaMerge$Row.names <- NULL
+metaMerge$roiint_log.meta.data.integrated_snn_res.0.35 <- NULL
+roiint_log <- AddMetaData(roiint_log, metadata = metaMerge)
+
+### CD8+ T cells
+newdf_t8 <- data.frame(sub_t8_res$integrated_snn_res.0.15, row.names = colnames(sub_t8_res)) # epithelial
+colnames(newdf_t8) <- c("subclustering_t8")
+
+#### make a dataframe with all cells in original roiint_log object, to merge subcluster info into
+df <- data.frame(roiint_log$cellType, row.names = colnames(roiint_log))
+length(unique(df$roiint_log.meta.data.integrated_snn_res.0.35))
+
+#### merge the two dataframes you made
+metaMerge <- merge(df, newdf_t8, by.x = "row.names", by.y = "row.names", all.x = T)
+metaMerge$subclustering_t8 <- as.character(metaMerge$subclustering_t8)
+rownames(metaMerge) <- metaMerge$Row.names
+metaMerge$Row.names <- NULL
+metaMerge$roiint_log.meta.data.integrated_snn_res.0.35 <- NULL
+roiint_log <- AddMetaData(roiint_log, metadata = metaMerge)
+View(roiint_log) # confirm if placed correctly in the Seurat object
+
+## the subclusters saved as separate columns, so will use a loop to coerce the subcluster names into original seurat object
+id_df <- data.frame(originalClustering = roiint_log$cellType,
+                    subclustering_asma = roiint_log$subclustering_asma,
+                    subclustering_b = roiint_log$subclustering_b,
+                    subclustering_epi = roiint_log$subclustering_epi,
+                    subclustering_fap = roiint_log$subclustering_fap,
+                    subclustering_macro = roiint_log$subclustering_macro,
+                    subclustering_NK = roiint_log$subclustering_NK,
+                    subclustering_t4 = roiint_log$subclustering_t4,
+                    subclustering_t8 = roiint_log$subclustering_t8)
+
+for (i in 1:length(rownames(id_df))) {
+  if ((is.na(id_df$subclustering_asma[i]) == F)) { # check na's for cluster 0 subclustering column
+    id_df$coerced_sub[i] <- paste0(id_df$originalClustering[i], "_", id_df$subclustering_asma[i])
+  } # then pull the info from the right column and coerce to one single column
+  if (is.na(id_df$subclustering_b[i]) == F) {
+    id_df$coerced_sub[i] <- paste0(id_df$originalClustering[i], "_", id_df$subclustering_b[i])
+  }
+  if (is.na(id_df$subclustering_epi[i]) == F) {
+    id_df$coerced_sub[i] <- paste0(id_df$originalClustering[i], "_", id_df$subclustering_epi[i])
+  }
+  if (is.na(id_df$subclustering_fap[i]) == F) {
+    id_df$coerced_sub[i] <- paste0(id_df$originalClustering[i], "_", id_df$subclustering_fap[i])
+  }
+  if (is.na(id_df$subclustering_macro[i]) == F) {
+    id_df$coerced_sub[i] <- paste0(id_df$originalClustering[i], "_", id_df$subclustering_macro[i])
+  }
+  if (is.na(id_df$subclustering_NK[i]) == F) {
+    id_df$coerced_sub[i] <- paste0(id_df$originalClustering[i], "_", id_df$subclustering_NK[i])
+  }
+  if (is.na(id_df$subclustering_t4[i]) == F) {
+    id_df$coerced_sub[i] <- paste0(id_df$originalClustering[i], "_", id_df$subclustering_t4[i])
+  }
+  if (is.na(id_df$subclustering_t8[i]) == F) {
+    id_df$coerced_sub[i] <- paste0(id_df$originalClustering[i], "_", id_df$subclustering_t8[i])
+  }
+}
+
+id_df
+roiint_log <- AddMetaData(roiint_log, metadata = id_df)
+
+roiint_log$coerced_sub # should now be a column reflecting all subclustering results
+
+## renaming subclusters as either their cell type, or with their phenotype (e.g. active, proliferative, apoptotic, and/or inhibitory)
+roiint_log$coerced_sub <- as.factor(roiint_log$coerced_sub)
+roiint_log <- RenameIdents(roiint_log,
+                           "aSMA+ fibroblast_0" = "aSMA+ fibroblast",
+                           "aSMA+ fibroblast_1" = "aSMA+/Vim+ fibroblast",
+                           "NK cell_0" = "NK cell (proliferative)", 
+                           "aSMA+ fibroblast_2" = "aSMA+/Vim+ fibroblast",
+                           "macrophage_0" = "macrophage",
+                           "B cell_1" = "B cell",
+                           "epithelial_1" = "epithelial",
+                           "CD4+ T cell_1" = "CD4+ T cell (active)",
+                           "epithelial_3" = "epithelial (proliferative)",
+                           "epithelial_2" = "epithelial (IFNg+)",
+                           "CD8+ T cell_2" = "CD8+ T cell",
+                           "FAP+ fibroblast_1" = "FAP+ fibroblast",
+                           "CD4+ T cell_0" = "CD4+ Treg cell (active)",
+                           "macrophage_1" = "macrophage (apoptotic)",
+                           "macrophage_2" = "macrophage (active)",
+                           "epithelial_0" = "epithelial (NKp44+)",
+                           "CD8+ T cell_0" = "CD8+ T cell (active)",
+                           "CD8+ T cell_1" = "CD8+ T cell",
+                           "epithelial_4" = "epithelial (apoptotic)", 
+                           "NK cell_1" = "NK cell (active)", 
+                           "CD4+ T cell_2" = "CD4+ T cell (proliferative)",
+                           "NK cell_3" = "NK cell",
+                           "NK cell_4" = "NK cell",
+                           "aSMA+ fibroblast_3" = "aSMA+ fibroblast (inhibitory)", 
+                           "NK cell_2" = "NK cell (active)", 
+                           "CD4+ T cell_3" = "CD4+ T cell (active)",
+                           "NK cell_6" = "NK cell (proliferative)",
+                           "FAP+ fibroblast_0" = "FAP+ fibroblast (apoptotic)",
+                           "B cell_0" = "B cell (active)", 
+                           "B cell_2" = "B cell",
+                           "CD8+ T cell_3" = "CD8+ T cell (proliferative)",
+                           "NK cell_5" = "NK cell (active)",
+                           "macrophage_3" = "macrophage (proliferative)",
+                           "CD8+ T cell_5" = "CD8+ T cell",
+                           "CD4+ T cell_4" = "CD4+ T cell",
+                           "B cell_3" = "B cell",
+                           "aSMA+ fibroblast_4" = "aSMA+ fibroblast (proliferative)",
+                           "B cell_5" = "B cell",
+                           "CD8+ T cell_4" = "CD8+ T cell (active)",
+                           "B cell_4" = "B cell (proliferative)",
+                           "FAP+ fibroblast_2" = "FAP+ fibroblast (proliferative)")
+
+roiint_log$subcluster <- Idents(roiint_log)
+
+#####  Add in metadata for spatial analyses - i.e. maskfile name #####
+maskdf <- as.data.frame(roiint_log$ImageId, 
+                        row.names = colnames(roiint_log))
+for (i in 1:length(rownames(maskdf))){
+  maskdf$maskFile[i] <- paste0(
+    unlist(strsplit(roiint_log$imageID[i], 
+                    split = ".", fixed = T))[1], 
+    "_ilastik_s2_Probabilities_mask.tiff")
+}
+
+roiint_log <- AddMetaData(roiint_log, 
+                      metadata = maskdf$maskFile, 
+                      col.name = "maskFile")
+
+for (i in 1:length(rownames(maskdf))){
+  maskdf$maskName[i] <- paste0(
+    unlist(strsplit(roiint_log$imageID[i], 
+                    split = ".", fixed = T))[1], 
+    "_ilastik_s2_Probabilities_mask")
+}
+
+roiint_log <- AddMetaData(roiint_log, 
+                      metadata = maskdf$maskName, 
+                      col.name = "maskName")
+
+saveRDS(roiint_log, file = "PDAC_IMC.RDS")
+
+sce <- as.SingleCellExperiment(roiint_log)
+
+saveRDS(sce, file = "PDAC_sce.RDS")
+```
+
+# Main Figures
+## Figure 1
+```{r Figure 1B}
+PDAC <- "PDAC_IMC.RDS" # load object of annotated IMC single cell data from PDAC patients
+
+DimPlot(PDAC, 
+        reduction = "umap",
+        dims = c(1L, 2L),
+        group.by = "cellType",
+        raster = F,
+        shuffle = F, 
+        repel = T, 
+        pt.size = 1,
+        cols = c("epithelial" = "#CC79A7",
+                 "aSMA+ fibroblast" = "#0072B2",
+                 "macrophage" = "#009E73",
+                 "NK cell" =  "#F0E442",
+                 "CD4+ T cell" = "#E69F00",
+                 "CD8+ T cell" = "#D55E00",
+                 "B cell" = "#666666",
+                 "FAP+ fibroblast" = "#56B4E9"))
+```
+
+```{r Figure 1C}
+sce <- "PDAC_sce.RDS" # load in SingleCellExperiment object of annotated IMC single cell data from PDAC patients
+
+cols <- dittoColors(reps = 29, get.names = F)
+length(unique(levels(sce$cellType)))
+cols[1:8] # view colors to assign to cell types
+
+# Create Heatmap objects
+features <- c("pankeratin", 
+              "Ecadherin", 
+              "aSMA",
+              "FAP", 
+              "vimentin", 
+              "CD45RO",
+              "CD20",
+              "CD3", 
+              "CD4", 
+              "CD8a", 
+              "FoxP3", 
+              "CD11b",
+              "CD68", 
+              "CD16",
+              "CD56", 
+              "NKp44",
+              "NKG2D")
+
+celltype_mean <- aggregateAcrossCells(as(sce, "SingleCellExperiment"),  
+                                      ids = sce$cellType, 
+                                      statistics = "mean",
+                                      use.assay.type = "logcounts", 
+                                      subset.row = features)
+
+dittoHeatmap(celltype_mean, 
+             annot.by = "cellType", 
+             annot.colors = c("#CC79A7", #epithelial
+                              "#0072B2", # aSMA+ fibroblast
+                              "#56B4E9", # FAP+ fibroblast
+                              "#666666", # B cell
+                              "#009E73", # macrophage
+                              "#E69F00", # CD4+ T cell
+                              "#D55E00", # CD8+ T cell
+                              "#F0E442"), # NK cell
+             cluster_rows = F, 
+             genes = features,
+             heatmap.colors = colorRampPalette(c("darkblue", "white", "darkred"))(50))
+```
+
+```{r Figure 1D}
+col_exprs = c("#0072B2", # aSMA+ fibroblast,
+              "#666666", # B cell
+              "#E69F00", # CD4+ T cell
+              "#D55E00", # CD8+ T cell
+              "#CC79A7", #epithelial
+              "#56B4E9", # FAP+ fibroblast
+              "#009E73", # macrophage
+              "#F0E442" # NK cell
+              ) 
+
+dittoBarPlot(PDAC,
+             "cellType",
+             group.by = "Case_Number",
+             color.panel = col_exprs)
+```
+
+```{r Figure 1F}
+# Add in metadata for spatial analyses with Cytomapper - i.e. maskfile name
+maskdf <- as.data.frame(PDAC$ImageId, 
+                        row.names = colnames(PDAC))
+for (i in 1:length(rownames(maskdf))){
+  maskdf$maskFile[i] <- paste0(
+    unlist(strsplit(PDAC$ImageId[i], 
+                    split = ".", fixed = T))[1], 
+    "_ilastik_s2_Probabilities_mask.tiff")
+}
+
+PDAC <- AddMetaData(PDAC,
+                    metadata = maskdf$maskFile,
+                    col.name = "maskFile")
+
+for (i in 1:length(rownames(maskdf))){
+  maskdf$maskName[i] <- paste0(
+    unlist(strsplit(PDAC$ImageId[i], 
+                    split = ".", fixed = T))[1], 
+    "_ilastik_s2_Probabilities_mask")
+}
+
+PDAC <- AddMetaData(PDAC,
+                    metadata = maskdf$maskName,
+                    col.name = "maskName")
+
+sce <- as.SingleCellExperiment(PDAC) # make SingleCellExperiment object for downstream analyses
+
+maskPath <- "ImcSegmentationPipeline-main/analysis/cpout" # Load in scale mask files and generate a metadata df to add to mask CytoImageList object 
+
+list.files(maskPath, pattern = "mask.tiff")
+
+maskFileDf <- data.frame(maskFile = list.files(maskPath, pattern = "mask.tiff"))
+
+all_masks <- loadImages(maskPath, pattern = "mask.tiff") # load mask images of all single cell data into a CytoImageList object
+
+all_masks <- scaleImages(all_masks, 2^16-1) # Scale data from cell profiler to integer values
+saveRDS(all_masks, file = "all_masks_cytomapper.RDS")
+
+PDAC_masks_test <- subset(all_masks, names(all_masks) %in% PDAC$maskName)
+
+sub_masks <- subset(PDAC_masks_test, names(PDAC_masks_test) == "TMA_1_s0_a29_ac_ilastik_s2_Probabilities_mask") 
+
+length(intersect(names(sub_masks), unique(PDAC$mask))) # subset the mask CytoImageList for images pertaining to samples in PDAC seurat object
+
+sub_maskFileDf <- subset(maskFileDf, maskFileDf$maskName %in% PDAC$maskName)
+
+# use the seurat or sce object to pull metadata and to add to mcols in the mask CytoImageList.
+mcols(sub_masks)$maskName <- "test"
+mcols(sub_masks)$maskName <- rownames(mcols(sub_masks))
+
+# plotCells                                
+p1 <- plotCells(mask = sub_masks, 
+                object = sce, 
+                img_id = "maskName", 
+                cell_id = "CellId", 
+                exprs_values = 'logcounts',
+                colour_by = 'cellType',
+                outline_by = 'cellType',
+                return_plot = TRUE,
+                thick = F,
+                missing_colour = "white",
+                background_colour = "black",
+                legend = NULL,
+                image_title = NULL,
+                colour = list(cellType = c("epithelial" = "#CC79A7",
+                                           "aSMA+ fibroblast" = "#0072B2",
+                                           "macrophage" = "#009E73", 
+                                           "NK cell" =  "#F0E442", 
+                                           "CD4+ T cell" = "#E69F00",
+                                           "CD8+ T cell" = "#D55E00", 
+                                           "B cell" = "#666666", 
+                                           "FAP+ fibroblast" = "#56B4E9")))
+```
+
+## Figure 2
+```{r Figure 2B}
+sce <- "PDAC_sce.RDS" # load in SingleCellExperiment object of annotated IMC single cell data from PDAC patients
+
+
+sce <- buildSpatialGraph(sce, img_id = "ImageId", type = "knn", k = 15, coords = c("X_position", "Y_position"))
+
+sce <- aggregateNeighbors(sce, colPairName = "knn_interaction_graph", 
+                          aggregate_by = "metadata", count_by = "subcluster")
+
+set.seed(220705)
+
+cn_1 <- kmeans(sce$aggregatedNeighbors, centers = 8) # can adjust the number of neighbors here
+sce$cn_subcluster <- as.factor(cn_1$cluster)
+
+for_plot <- colData(sce) %>% as_tibble() %>%
+  group_by(cn_subcluster, subcluster) %>%
+  dplyr::summarize(count = n(), .groups = "drop") %>%
+  mutate(freq = count / sum(count)) %>%
+  pivot_wider(id_cols = cn_subcluster, names_from = subcluster, 
+              values_from = freq, values_fill = 0) %>%
+  ungroup() %>%
+  select(-cn_subcluster)
+
+pheatmap(for_plot, color = colorRampPalette(c("darkblue", "white", "darkred"))(100), scale = "column", legend = T, labels_row = row.names(for_plot))
+```
+
+```{r Figure 2C}
+out <- testInteractions(sce,
+                        group_by = "Case_Number", # CHECK IS THIS IS CORRECT
+                        label = "subcluster", 
+                        colPairName = "knn_interaction_graph")
+
+subcluster_interactions <- out %>% as_tibble() %>%
+  group_by(from_label, to_label) %>%
+  plyr::summarize(sum_sigval = sum(sigval, na.rm = TRUE)) %>%
+  ggplot() +
+  geom_tile(aes(from_label, to_label, fill = sum_sigval)) +
+  scale_fill_gradient2(low = muted("darkblue"), mid = "white", high = muted("darkred")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+subcluster_interactions <- out
+
+# calculating FDR for these interactions 
+subcluster_interactions$FDR <- p.adjust(subcluster_interactions$p, method = "fdr", n = length(subcluster_interactions$p))
+
+subcluster_interactions$p_adjusted <- "FALSE"
+subcluster_interactions$p_adjusted[subcluster_interactions$FDR < 0.01] <- "TRUE"
+subcluster_interactions$p_adjusted == subcluster_interactions$sig
+
+subcluster_interactions$sigval_adjusted <- NULL
+subcluster_interactions$sigval_adjusted[subcluster_interactions$interaction == TRUE & subcluster_interactions$p_adjusted == TRUE] <- "1"
+subcluster_interactions$sigval_adjusted[subcluster_interactions$interaction == TRUE & subcluster_interactions$p_adjusted == FALSE] <- "0"
+subcluster_interactions$sigval_adjusted[subcluster_interactions$interaction == FALSE & subcluster_interactions$p_adjusted == FALSE] <- "0"
+subcluster_interactions$sigval_adjusted[subcluster_interactions$interaction == FALSE & subcluster_interactions$p_adjusted == TRUE] <- "-1"
+
+subcluster_interactions$sigval_adjusted <- as.numeric(subcluster_interactions$sigval_adjusted)
+
+interaction_sub <- subcluster_interactions %>% as_tibble() %>%
+  group_by(from_label, to_label) %>%
+  plyr::summarize(sum_sigval_adjusted = sum(sigval_adjusted, na.rm = TRUE)) %>%
+  ggplot() +
+  geom_tile(aes(from_label, to_label, fill = sum_sigval_adjusted)) +
+  scale_fill_gradient2(low = muted("darkblue"), mid = "white", high = muted("darkred")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+interaction_sub
+```
+
+```{r Figure 2D Analysis: Distance Analysis}
+cellType_levels <- unique(sce$cellType)
+legendctype <- as.data.frame(cbind(paste0("ctype",1:length(cellType_levels)),levels(cellType_levels))) # cell type legend
+
+# munging data to compile distance data from all PDAC patient samples
+expr <- data.frame(sce$CellId, sce$X_position, sce$Y_position, sce$cellType, sce$subcluster, sce$ImageId, sce$Case_Number)
+all <- unique(expr$sce.Case_Number)
+
+# subset coordinate data from each patient (21 total patients)
+expr_p1<-expr[expr$sce.Case_Number==all[1],]
+expr_p2<-expr[expr$sce.Case_Number==all[2],]
+expr_p3<-expr[expr$sce.Case_Number==all[3],]
+expr_p4<-expr[expr$sce.Case_Number==all[4],]
+expr_p5<-expr[expr$sce.Case_Number==all[5],]
+expr_p6<-expr[expr$sce.Case_Number==all[6],]
+expr_p7<-expr[expr$sce.Case_Number==all[7],]
+expr_p8<-expr[expr$sce.Case_Number==all[8],]
+expr_p9<-expr[expr$sce.Case_Number==all[9],]
+expr_p10<-expr[expr$sce.Case_Number==all[10],]
+expr_p11<-expr[expr$sce.Case_Number==all[11],]
+expr_p12<-expr[expr$sce.Case_Number==all[12],]
+expr_p13<-expr[expr$sce.Case_Number==all[13],]
+expr_p14<-expr[expr$sce.Case_Number==all[14],]
+expr_p15<-expr[expr$sce.Case_Number==all[15],]
+expr_p16<-expr[expr$sce.Case_Number==all[16],]
+expr_p17<-expr[expr$sce.Case_Number==all[17],]
+expr_p18<-expr[expr$sce.Case_Number==all[18],]
+expr_p19<-expr[expr$sce.Case_Number==all[19],]
+expr_p20<-expr[expr$sce.Case_Number==all[20],]
+expr_p21<-expr[expr$sce.Case_Number==all[21],]
+
+expr_p1$CellId <- rownames(expr_p1)
+expr_p2$CellId <- rownames(expr_p2)
+expr_p3$CellId <- rownames(expr_p3)
+expr_p4$CellId <- rownames(expr_p4)
+expr_p5$CellId <- rownames(expr_p5)
+expr_p6$CellId <- rownames(expr_p6)
+expr_p7$CellId <- rownames(expr_p7)
+expr_p8$CellId <- rownames(expr_p8)
+expr_p9$CellId <- rownames(expr_p9)
+expr_p10$CellId <- rownames(expr_p10)
+expr_p11$CellId <- rownames(expr_p11)
+expr_p12$CellId <- rownames(expr_p12)
+expr_p13$CellId <- rownames(expr_p13)
+expr_p14$CellId <- rownames(expr_p14)
+expr_p15$CellId <- rownames(expr_p15)
+expr_p17$CellId <- rownames(expr_p17)
+expr_p18$CellId <- rownames(expr_p18)
+expr_p19$CellId <- rownames(expr_p19)
+expr_p20$CellId <- rownames(expr_p20)
+expr_p21$CellId <- rownames(expr_p21)
+
+# create distance matrix by cellType for distance analysis (Figure 2D)
+## Start with expr_p1 (need to repeat for each patient) 
+## create placer cols for shortest distance to each cell type
+dummy <- matrix(nrow = nrow(expr_p1), ncol = length(cellType_levels)) 
+colnames(dummy) <- paste0("ctype", 1:length(cellType_levels))
+expr_p1 <- data.frame(expr_p1, d = dummy)
+
+# get distance matrix from index cell (row) to all cells
+dist1 <- as.matrix(dist(cbind(expr_p1$sce.X_position, expr_p1$sce.Y_position)))
+dist1 <- as.data.frame(dist1)
+
+for(i in 1:nrow(expr_p1)){ 
+  #looking at cell i in core k
+  celldistances1 <- data.frame(dist = dist1[,i], cluster = expr_p1$sce.cellType)
+  celldistances1$clustercode <- match(celldistances1$cluster,legendctype$V2)
+  for(j in 1:length(cellType_levels)){
+    #among all cells of cell type j, what non-zero (non-self) distance is the closest
+    min_d_j <- min(celldistances1[celldistances1$cluster==cellType_levels[j],]$dist[celldistances1[celldistances1$cluster==cellType_levels[j],]$dist!=0])
+    expr_p1[i,paste0("d.ctype",j)] <- min_d_j
+  }
+}
+
+expr_p1$ctype_no<-paste0("ctype",match(expr_p1$sce.cellType,legendctype$V2))
+
+expr_k <- expr_p1
+expr_k_m<-as.matrix(expr_k[,colnames(expr_k)[str_detect(colnames(expr_k),"d.c")]])
+rownames(expr_k_m)<-expr_k$ctype_no
+colnames(expr_k_m)<-legendctype$V2
+expr_k_m[is.infinite(expr_k_m)]<-NA
+
+#remove cell type columns where there are no cells
+expr_k_m_rm0<-expr_k_m[,colnames(expr_k_m) %nin% colnames(expr_k_m)[colSums(expr_k_m, na.rm = T)==0]]
+mat_P=aggregate(x=expr_k_m_rm0, by=list(rownames(expr_k_m_rm0)), FUN=mean, na.rm=T)
+groupnames<-(mat_P$Group.1)
+mat_P_mx<-as.matrix(mat_P[,2:ncol((mat_P))])
+rownames(mat_P_mx)<-str_sub(groupnames,6,) # add the rownames
+mat_P_mx # distance matrix from patient of interest. Save as a .csv file and plot NK cell distances (based on legendctype rowname) externally
+# repeat lines 1186-1200 for all patient samples
+```
+
+```{r Figure 2E Analysis: Network Analyses}
+subcluster_levels <- unique(sce$subcluster)
+
+# Calculate cell counts and proportions for network graph nodes #####
+## PROPORTIONS
+cell_table <- table(sce$ImageId)
+ggdf <- data.frame(ImageId = names(cell_table), 
+                   cell_counts = as.numeric(cell_table))
+ggdf$subcluster <- factor(sce$subcluster[match(ggdf$ImageId, sce$ImageId)], levels = subcluster_levels)
+ggdf$celType <- factor(sce$cellType[match(ggdf$ImageId, sce$ImageId)], levels = cellType_levels)
+
+## COUNTS
+counts_table <- table(sce$subcluster, sce$ImageId)
+props_table <- t(t(counts_table) / colSums(counts_table)) * 100
+counts <- as.data.frame.matrix(counts_table)
+props <- as.data.frame.matrix(props_table)
+
+ggdf <- melt(data.frame(cluster = rownames(props),props, check.names = FALSE),
+             id.vars = "cluster", value.name = "proportion", 
+             variable.name = "ImageId")
+
+ggdft <- melt(data.frame(cluster = rownames(counts), counts, check.names = FALSE),
+              id.vars = "cluster", value.name = "counts", 
+              variable.name = "ImageId")
+
+ggdft$cluster <- factor(ggdft$cluster, levels=levels(subcluster_levels))
+totalcounts<-ggdft %>% group_by(cluster) %>% dplyr::summarize_at(vars(counts),funs(sum))
+
+legendctype<-as.data.frame(cbind(paste0("ctype",1:length(subcluster_levels)),levels(subcluster_levels))) # cell type legend
+total<-sum(totalcounts$counts)
+pct_P <- totalcounts$counts/total*100 # cell percentage
+
+# munging data to compile distance data from all PDAC IMC images (mat = distance matrix); alternatively, can import the "mat.RDS" object for downstream network analyses
+
+expr <- data.frame (sce$CellId, sce$X_position, sce$Y_position, sce$cellType, sce$subcluster, sce$ImageId, sce$Case_Number)
+all <- unique(expr$sce.ImageId)
+
+# all samples (44 total images)
+expr_1<-expr[expr$sce.ImageId==all[1],]
+expr_2<-expr[expr$sce.ImageId==all[2],]
+expr_3<-expr[expr$sce.ImageId==all[3],]
+expr_4<-expr[expr$sce.ImageId==all[4],]
+expr_5<-expr[expr$sce.ImageId==all[5],]
+expr_6<-expr[expr$sce.ImageId==all[6],]
+expr_7<-expr[expr$sce.ImageId==all[7],]
+expr_8<-expr[expr$sce.ImageId==all[8],]
+expr_9<-expr[expr$sce.ImageId==all[9],]
+expr_10<-expr[expr$sce.ImageId==all[10],]
+expr_11<-expr[expr$sce.ImageId==all[11],]
+expr_12<-expr[expr$sce.ImageId==all[12],]
+expr_13<-expr[expr$sce.ImageId==all[13],]
+expr_14<-expr[expr$sce.ImageId==all[14],]
+expr_15<-expr[expr$sce.ImageId==all[15],]
+expr_16<-expr[expr$sce.ImageId==all[16],]
+expr_17<-expr[expr$sce.ImageId==all[17],]
+expr_18<-expr[expr$sce.ImageId==all[18],]
+expr_19<-expr[expr$sce.ImageId==all[19],]
+expr_20<-expr[expr$sce.ImageId==all[20],]
+expr_21<-expr[expr$sce.ImageId==all[21],]
+expr_22<-expr[expr$sce.ImageId==all[22],]
+expr_23<-expr[expr$sce.ImageId==all[23],]
+expr_24<-expr[expr$sce.ImageId==all[24],]
+expr_25<-expr[expr$sce.ImageId==all[25],]
+expr_26<-expr[expr$sce.ImageId==all[26],]
+expr_27<-expr[expr$sce.ImageId==all[27],]
+expr_28<-expr[expr$sce.ImageId==all[28],]
+expr_29<-expr[expr$sce.ImageId==all[29],]
+expr_30<-expr[expr$sce.ImageId==all[30],]
+expr_31<-expr[expr$sce.ImageId==all[31],]
+expr_32<-expr[expr$sce.ImageId==all[32],]
+expr_33<-expr[expr$sce.ImageId==all[33],]
+expr_34<-expr[expr$sce.ImageId==all[34],]
+expr_35<-expr[expr$sce.ImageId==all[35],]
+expr_36<-expr[expr$sce.ImageId==all[36],]
+expr_37<-expr[expr$sce.ImageId==all[37],]
+expr_38<-expr[expr$sce.ImageId==all[38],]
+expr_39<-expr[expr$sce.ImageId==all[39],]
+expr_40<-expr[expr$sce.ImageId==all[40],]
+expr_41<-expr[expr$sce.ImageId==all[41],]
+expr_42<-expr[expr$sce.ImageId==all[42],]
+expr_43<-expr[expr$sce.ImageId==all[43],]
+expr_44<-expr[expr$sce.ImageId==all[44],]
+
+expr_1$CellId <- rownames(expr_1)
+expr_2$CellId <- rownames(expr_2)
+expr_3$CellId <- rownames(expr_3)
+expr_4$CellId <- rownames(expr_4)
+expr_5$CellId <- rownames(expr_5)
+expr_6$CellId <- rownames(expr_6)
+expr_7$CellId <- rownames(expr_7)
+expr_8$CellId <- rownames(expr_8)
+expr_9$CellId <- rownames(expr_9)
+expr_10$CellId <- rownames(expr_10)
+expr_11$CellId <- rownames(expr_11)
+expr_12$CellId <- rownames(expr_12)
+expr_13$CellId <- rownames(expr_13)
+expr_14$CellId <- rownames(expr_14)
+expr_15$CellId <- rownames(expr_15)
+expr_16$CellId <- rownames(expr_16)
+expr_17$CellId <- rownames(expr_17)
+expr_18$CellId <- rownames(expr_18)
+expr_19$CellId <- rownames(expr_19)
+expr_20$CellId <- rownames(expr_20)
+expr_21$CellId <- rownames(expr_21)
+expr_22$CellId <- rownames(expr_22)
+expr_23$CellId <- rownames(expr_23)
+expr_24$CellId <- rownames(expr_24)
+expr_25$CellId <- rownames(expr_25)
+expr_26$CellId <- rownames(expr_26)
+expr_27$CellId <- rownames(expr_27)
+expr_28$CellId <- rownames(expr_28)
+expr_29$CellId <- rownames(expr_29)
+expr_30$CellId <- rownames(expr_30)
+expr_31$CellId <- rownames(expr_31)
+expr_32$CellId <- rownames(expr_32)
+expr_33$CellId <- rownames(expr_33)
+expr_34$CellId <- rownames(expr_34)
+expr_35$CellId <- rownames(expr_35)
+expr_36$CellId <- rownames(expr_36)
+expr_37$CellId <- rownames(expr_37)
+expr_38$CellId <- rownames(expr_38)
+expr_39$CellId <- rownames(expr_39)
+expr_40$CellId <- rownames(expr_40)
+expr_41$CellId <- rownames(expr_41)
+expr_42$CellId <- rownames(expr_42)
+expr_43$CellId <- rownames(expr_43)
+expr_44$CellId <- rownames(expr_44)
+
+### create distance matrix by subcluster
+# Start with expr_1 
+# create placer cols for shortest distance to each subcluster type
+dummy <- matrix(nrow = nrow(expr_1), ncol = length(subcluster_levels)) 
+colnames(dummy) <- paste0("ctype", 1:length(subcluster_levels))
+expr_1 <- data.frame(expr_1, d = dummy)
+
+# get distance matrix from index cell (row) to all cells
+dist1 <- as.matrix(dist(cbind(expr_1$sce.X_position,expr_1$sce.Y_position)))
+dist1 <- as.data.frame(dist1)
+
+for(i in 1:nrow(expr_1)){ 
+  #looking at cell i in core k
+  celldistances1 <- data.frame(dist = dist1[,i], cluster = expr_1$sce.subcluster)
+  celldistances1$clustercode <- match(celldistances1$cluster,legendctype$V2)
+  for(j in 1:length(subcluster_levels)){
+    #among all cells of cell type j, what non-zero (non-self) distance is the closest
+    min_d_j <- min(celldistances1[celldistances1$cluster==subcluster_levels[j],]$dist[celldistances1[celldistances1$cluster==subcluster_levels[j],]$dist!=0])
+    expr_1[i,paste0("d.ctype",j)] <- min_d_j
+  }
+}
+
+expr_1$ctype_no<-paste0("ctype", match(expr_1$sce.ImageId,legendctype$V2))
+
+# repeat lines 1335-1356 for each image to generate an "expr" image dataframe
+
+# create a single dataframe from all image distance data
+expr_k_m <- rbind(expr_1, expr_2, expr_3, expr_4, expr_5, expr_6, expr_7, expr_8, expr_9, expr_10,
+                  expr_11, expr_12, expr_13, expr_14, expr_15, expr_16, expr_17, expr_18, expr_19, expr_20,
+                  expr_21, expr_22, expr_23, expr_24, expr_25, expr_26, expr_27, expr_28, expr_29, expr_30,
+                  expr_31, expr_32, expr_33, expr_34, expr_35, expr_36, expr_37, expr_38, expr_39, expr_40,
+                  expr_41, expr_42, expr_43, expr_44)
+
+expr_k_m<-as.matrix(expr_k[,colnames(expr_k)[str_detect(colnames(expr_k),"d.c")]])
+rownames(expr_k_m)<-expr_k$ctype_no
+colnames(expr_k_m)<-legendctype$V2
+expr_k_m[is.infinite(expr_k_m)]<-NA
+
+#remove cell type columns where there are no cells
+expr_k_m_rm0<-expr_k_m[,colnames(expr_k_m) %nin% colnames(expr_k_m)[colSums(expr_k_m, na.rm = T)==0]]
+mat_P = aggregate(x=expr_k_m_rm0, by=list(rownames(expr_k_m_rm0)), FUN=mean, na.rm=T) # move on to Figure 2E
+```
+
+```{r Figure 2E}
+mat <- readRDS(file = "mat.RDS") # import distance matrix data of all subclusters from all PDAC images
+
+# munge data to a distance matrix
+mat_P = aggregate(x=mat, by=list(rownames(mat)), FUN=mean, na.rm=T)
+groupnames <- (mat_P$Group.1)
+mat_P_mx <- as.matrix(mat_P[,2:ncol((mat_P))])
+rownames(mat_P_mx) <- str_sub(groupnames,6,) # add the rownames
+dist_P <- dist(mat_P_mx)
+
+cols <- dittoColors(reps = 29, get.names = F)
+colorlist <- cols[as.numeric(as.factor(legendctype$V2))]
+
+colorlist <- c("#0072B2", # aSMA+ fibroblast,
+               "#D55E00", # CD8+ T cell,
+               "#56B4E9", # FAP+ fibroblast,
+               "#E69F00", #CD4+ Treg cell (active),
+               "#009E73", # macrophage (apoptotic),
+               "#009E73", # macrophage (active),
+               "#CC79A7", # epithelial (NKp44+),
+               "#D55E00", # CD8+ T cell (active),
+               "#CC79A7", # epithelial (apoptotic),
+               "#F0E442", # NK cell (active),
+               "#E69F00", # CD4+ T cell (proliferative),
+               "#0072B2", # aSMA+/Vim+ fibroblast,
+               "#F0E442", # NK cell
+               "#0072B2", # aSMA+ fibroblast (inhibitory),
+               "#56B4E9", # FAP+ fibroblast (apoptotic),
+               "#666666", # B cell (active),
+               "#D55E00", # CD8+ T cell (proliferative),
+               "#009E73", # macrophage (proliferative),
+               "#E69F00", # CD4+ T cell,
+               "#0072B2", # aSMA+ fibroblast (proliferative),
+               "#666666", # B cell (proliferative),
+               "#56B4E9", # FAP+ fibroblast (proliferative)
+               "#F0E442", # NK cell (proliferative),
+               "#009E73", # macrophage,
+               "#666666", # B cell,
+               "#CC79A7", #epithelial,
+               "#E69F00", #CD4+ T cell (active),
+               "#CC79A7", # epithelial (proliferative),
+               "#CC79A7") # epithelial (IFNg+)
+
+# generate visualizations of distance relationships using network qgraph
+names(colorlist) <- as.character(colnames(mat_P_mx))
+g <- qgraph(1/dist_P)
+g_node_ind <- as.numeric((g$graphAttributes$Nodes$names))
+nodesizes <- pct_P[g_node_ind]
+nodesizessc <- sqrt(nodesizes)*2.5
+
+legend_list <- c("1 = aSMA+ fibroblast",
+                 "2 = aSMA+/Vim+ fibroblast",
+                 "3 = NK cell (proliferative)",
+                 "4 = macrophage",
+                 "5 = B cell",
+                 "6 = epithelial",
+                 "7 = CD4+ T cell (active)",
+                 "8 = epithelial (proliferative)",
+                 "9 = epithelial (IFNg+)",
+                 "10 = CD8+ T cell",
+                 "11 = FAP+ fibroblast",
+                 "12 = CD4+ Treg cell (active)",
+                 "13 =macrophage (apoptotic)",
+                 "14 = macrophage (active)",
+                 "15 = epithelial (NKp44+)",
+                 "16 = CD8+ T cell (active)",
+                 "17 = epithelial (apoptotic)",
+                 "18 = NK cell (active)",
+                 "19 = CD4+ T cell (proliferative)",
+                 "20 = NK cell",
+                 "21 = aSMA+ fibroblast (inhibitory)",
+                 "22 = FAP+ fibroblast (apoptotic)",
+                 "23 = B cell (active)",
+                 "24 = CD8+ T cell (proliferative)",
+                 "25 = macrophage (proliferative)",
+                 "26 = CD4+ T cell",
+                 "27 = aSMA+ fibroblast (proliferative)",
+                 "28 = B cell (proliferative)",
+                 "29 = FAP+ fibroblast (proliferative)")
+
+g <- qgraph(1/dist_P, 
+            layout='spring', 
+            repulsion=4, 
+            minimum=quantile(1/dist_P)[4],
+            vsize=nodesizessc,
+            label.scale=F,
+            label.cex=1,
+            edge.color="darkgray",
+            borders=F,
+            color=colorlist) + legend("topleft",
+                                      legend=(legend_list), 
+                                      bty = "n",
+                                      cex = 0.5,
+                                      text.col="black",
+                                      horiz = F,
+                                      ncol = 3) 
+```
+
+## Figure 3
+```{r Figure 3A-C Analysis: CellSelector}
+# filter original info for cells present in IMC seurat obj
+dataSet$ROI_CellId <- paste0(dataSet$ImageId, "_", dataSet$CellId)
+subDataSet <- subset(dataSet, dataSet$ROI_CellId %in% colnames(PDAC))
+
+# store spatial coordinates within Seurat object embeddings
+spatial<-(subDataSet[,c("X_position","Y_position")])
+# spatial <- spatial*-1
+spatial<-as.matrix(spatial)
+rownames(spatial) <- paste0(subDataSet$ImageId, "_", subDataSet$CellId)
+colnames(spatial) <- c("spatial_1", "spatial_2")
+
+PDAC[["spatial"]] <- CreateDimReducObject(embeddings = spatial, key = "spatial_")
+PDAC[["spatial"]]
+
+Idents(PDAC) <- PDAC$imageID
+
+# generate a list of figures, each figure of a different image ID
+plots <- vector('list', length = length(unique(PDAC$ImageId))) # for cellType
+# plots_sub <- vector('list', length = length(unique(PDAC$imageID))) # for subcluster if wanting to select by subcluster. just need to make sure the variable is correct in the next section of code
+
+# can replace cellType with subcluster if interested in selecting ROIs that way
+
+for (i in seq_along(unique(PDAC$ImageId))){
+  plots[[i]] <- local({
+    i <- i
+    p1 <- DimPlot(PDAC, 
+                  group.by = "subcluster", 
+                  reduction = "spatial", 
+                  cells = WhichCells(PDAC, idents = c(unique(PDAC$imageID)[i])),
+                  cols = DiscretePalette(n = length(unique(levels(PDAC$subcluster))), palette = "alphabet2"),
+                  pt.size = 3, label = F, shape.by = NULL, raster = F)
+    print(p1)
+  })
+} # can replace cellType with subcluster if interested in selecting ROIs that way
+
+# Here, the brackets tell CellSelector which image ID to go through. Replace i with image number of interest
+image_duct <- CellSelector(plot = plots[[i]])
+write.csv(image_duct, file = "image_i_duct_x_cells.csv") 
+
+image_i_duct_x <- image_duct # this is now a vector of cells which you selected
+write.csv(image_i_duct_x, file = "image_i_duct_x_cells.csv")
+# Repeat for all ducts in each plot (e.g. plots[[1]] is first image, and image1_duct1 would be the first duct in the first image, etc.)
+
+# Some ducts require multiple selections. To collect the unique cells
+# Run this if there are multiple duct files to merge the cells into one variable to be subsetted into a Seurat object
+image_duct <- unique(c(image_i_duct_x,
+                       image_i_duct_x
+                       ))
+write.csv(image_duct, file = "image_i_duct_x_cells.csv")
+
+# now we can subset that scecific duct (scecific structure) for analysis of cell type proportions
+image_i_duct_x_cells <- subset(PDAC, cells = image_duct)
+
+counts <- table(image_i_duct_x_cells.csv$subcluster) # makes a table quantifying each cell subpopulation
+counts
+write.csv(counts, file = "image_i_duct_x_cells_subcluster_counts.csv") # open file in Excel and cells can be counted and startified by fibroblast abundance quartile to be plotted externally in GraphPad Prism for Figure 3A-C and Supplementary Figure S4-5
+# image_duct and quartile information are also in the PDAC_IMC.RDS and PDAC_sce.RDS objects
+```
+
+```{r Figure 3G}
+features <- c("CD69",
+              "CD107a",
+              "granzyme-B",
+              "IFNg",
+              "perforin",
+              "Ki67",
+              "PCNA",
+              "TGFb",
+              "cl-caspase-3",
+              "collagen-I",
+              "MICA",
+              "HLA-ABC",
+              "HLA-A1",
+              "PD1",
+              "PDL1") # select functional markers from IMC panel
+
+Idents(PDAC) <- PDAC$cellType
+
+NK_roi <- subset(PDAC, idents = "NK cell")
+Idents(NK_roi) <- NK_roi$ROI_Quar
+
+NK_roi_sce <- as.SingleCellExperiment(NK_ROI)
+NK <- aggregateAcrossCells(as(NK_roi_sce, "SingleCellExperiment"),  
+                               ids = NK_roi_sce$ROI_Quar, 
+                               statistics = "mean",
+                               use.assay.type = "logcounts", 
+                               subset.row = features)
+dittoHeatmap(NK, annot.by = "ROI_Quar", features = features, cluster_rows = F, heatmap.colors = colorRampPalette(c("darkblue", "white", "darkred"))(50))
+```
+
+```{r Figure 3H-K}
+Idents(NK_roi) <- NK_roi$ROI_Quar
+VlnPlot(NK_roi, features = c("CD69", "CD107a", "IFNg", "granzyme-B"), ncol = 2, idents = c("Q1", "Q4", "stroma"), pt.size = 0, dittoColors()[1:3])
+```
+
+```{r Figure 3L}
+features <- c("CD69",
+              "CD107a",
+              "granzyme-B",
+              "IFNg",
+              "perforin",
+              "Ki67",
+              "PCNA",
+              "TGFb",
+              "cl-caspase-3",
+              "collagen-I",
+              "MICA",
+              "HLA-ABC",
+              "HLA-A1",
+              "PD1",
+              "PDL1") # select functional markers from IMC panel
+
+Idents(PDAC) <- PDAC$cellType
+
+epi_roi <- subset(PDAC, idents = "epithelial")
+
+epi_roi_sce <- as.SingleCellExperiment(epi_ROI)
+epi <- aggregateAcrossCells(as(epi_roi_sce, "SingleCellExperiment"),  
+                               ids = epi_roi_sce$ROI_Quar, 
+                               statistics = "mean",
+                               use.assay.type = "logcounts", 
+                               subset.row = features)
+dittoHeatmap(epi, annot.by = "ROI_Quar", features = features, cluster_rows = F, heatmap.colors = colorRampPalette(c("darkblue", "white", "darkred"))(50))
+```
+
+## Figure 4
+```{r CytoTRACE analysis}
+# Here we show the main functions used for CytoTRACE analysis adapted from: 
+## Gunsagar S. Gulati et al. ,Single-cell transcriptional diversity is a hallmark of developmental potential.Science367,405-411(2020).DOI:10.1126/science.aax0249
+
+# The PDAC scRNAseq dataset was previously published at doi: 10.1038/s43018-020-00121-4 
+
+load(file = "TotalTissue090320.RData") # load the Steele et al. PDAC scRNAseq dataset
+counts_matrix <- as.data.frame(GetAssayData(TotalTissue.combined.harmony_fil, slot = "counts"))
+
+# Extract cell-type annotations from Seurat object
+obj_cell_type_anno <- as.data.frame(TotalTissue.combined.harmony_fil$Expanded_labels)
+
+# Run CytoTRACE
+results <- CytoTRACE(counts_matrix)
+
+cytoTRACE_res1 <- as.data.frame(results$CytoTRACE)
+cytoTRACE_res2 <- as.data.frame(results$CytoTRACErank)
+cytoTRACE_res3 <- as.data.frame(results$cytoGenes)
+
+cytoTRACE_meta <- cbind(cytoTRACE_res1, cytoTRACE_res2)
+
+TotalTissue.combined.harmony_fil <- AddMetaData(TotalTissue.combined.harmony_fil, metadata = cytoTRACE_meta)
+
+DimPlot(TotalTissue.combined.harmony_fil, label = T)
+FeaturePlot(TotalTissue.combined.harmony_fil, features = c("results.CytoTRACE"))
+
+epi <- subset(TotalTissue.combined.harmony_fil, idents = c("Epithelial")) # subset epithelial cells
+
+DimPlot(epi, label = T)
+FeaturePlot(epi, features = c("results.CytoTRACE"))
+
+DefaultAssay(epi)
+epi <- FindVariableFeatures(epi)
+epi <- ScaleData(epi)
+epi <- RunPCA(epi)
+ElbowPlot(epi, ndims = 50)
+epi <- FindNeighbors(epi)
+epi <- FindClusters(epi)
+epi <- RunUMAP(epi, reduction.name = "umap_epi", dims = 1:50)
+
+# Supplementary Figure 7A
+DimPlot(epi, label = T, reduction = "umap_epi", group.by = "ID")
+# Supplementary Figure 7A
+FeaturePlot(epi, features = c("results.CytoTRACE"), reduction = "umap_epi")
+
+total.split <- Seurat::SplitObject(TotalTissue.combined.harmony_fil, split.by = "ID")
+
+total.split <- lapply(X = total.split, FUN = function(x) {
+  x <- NormalizeData(x, verbose = FALSE)
+  x <- FindVariableFeatures(x, verbose = FALSE)
+})
+# Next, select features for downstream integration, and run PCA on each object in the list, which is required for running the alternative reciprocal PCA workflow.
+features <- SelectIntegrationFeatures(object.list = total.split)
+total.split <- lapply(X = total.split, FUN = function(x) {
+  x <- ScaleData(x, features = features, verbose = FALSE)
+  x <- RunPCA(x, features = features, verbose = FALSE)
+})
+
+anchors <- FindIntegrationAnchors(object.list = total.split, reduction = "rpca",
+                                  dims = 1:50)
+steele.integrated <- IntegrateData(anchorset = anchors, dims = 1:50)
+steele.integrated <- ScaleData(steele.integrated, verbose = FALSE)
+steele.integrated <- RunPCA(steele.integrated, verbose = FALSE)
+steele.integrated <- RunUMAP(steele.integrated, dims = 1:50)
+
+DimPlot(steele.integrated, group.by = c("Expanded_labels"), label = T)
+DimPlot(steele.integrated, group.by = c("Expanded_labels"), label = T)
+FeaturePlot(steele.integrated, features = c("results.CytoTRACE"))
+
+Idents(steele.integrated) <- steele.integrated$Expanded_labels
+epi.integrated <- subset(steele.integrated, idents = c("Epithelial"))
+
+DefaultAssay(epi.integrated) <- "integrated"
+epi.integrated <- ScaleData(epi.integrated, verbose = FALSE)
+epi.integrated <- RunPCA(epi.integrated, verbose = FALSE)
+epi.integrated <- FindNeighbors(epi.integrated, dims = 1:50)
+epi.integrated <- FindClusters(epi.integrated, resolution = seq(from = 0.1, to = 0.5, by = 0.1))
+epi.integrated <- RunUMAP(epi.integrated, dims = 1:50, reduction.name = "umap_epi_int", n.neighbors = 50, min.dist = 0.05)
+
+clustree::clustree(epi.integrated, prefix = "integrated_snn_res.", node_colour = "results.CytoTRACE", node_colour_aggr = "mean")
+clustree::clustree_overlay(epi.integrated, prefix = "integrated_snn_res.", x_value = "umap_epi_int_1", y_value = "umap_epi_int_2", red_dim = "umap_epi_int")
+
+epi.integrated$seurat_clusters <- epi.integrated$integrated_snn_res.0.72
+
+DimPlot(epi.integrated, reduction = "umap_epi_int", group.by = "ID")
+FeaturePlot(epi.integrated, features = c("results.CytoTRACE"), reduction = "umap_epi_int")
+DimPlot(epi.integrated, reduction = "umap_epi_int", group.by = "seurat_clusters")
+VlnPlot(epi.integrated, features = c("results.CytoTRACE"), group.by = "seurat_clusters")
+
+FeaturePlot(epi.integrated, reduction = "umap", features = c("results.CytoTRACE"))
+VlnPlot(epi.integrated, features = c("results.CytoTRACE"), group.by = "cytoTRACE_snn_classification")
+DimPlot(epi.integrated, reduction = "umap_epi_int", group.by = "cytoTRACE_snn_classification") + coord_fixed()
+
+# Identify ideal cytoTRACE cutoff
+## visualize potential cutoff of CytoTRACE scores
+hist(epi.integrated$results.CytoTRACE,100,F) # this data appears to be a mutlimodal, Gaussian distribution 
+
+# as the CytoTRACE scores exhibit a mutlimodal distribution, using the mclust package to determine the best cutoff for this model
+msEst <- mstep(modelName = "V", data = epi.integrated$results.CytoTRACE, z = epi.integrated$results.CytoTRACE)
+mixmodel <- em(data = epi.integrated$results.CytoTRACE, modelName = "V", parameters = msEst$parameters) # need to use this function as we do not have normally distributed data
+mixmodel$parameters$mean # the mean is ~0.72 so this will be the cutoff to differentiate epithelial cell states
+
+cutoff <- 0.72
+
+# Iterate through each cutoff value
+for (cutoff in cutoff) {
+  # Assign labels based on the cutoff value
+  labels <- as.data.frame(ifelse(epi.integrated$results.CytoTRACE >= cutoff, "positive", "negative"))
+  epi.integrated <- AddMetaData(epi.integrated, labels, col.name = paste0("cutoff_", cutoff, "_labels"))
+  epi.integrated <- SetIdent(epi.integrated, value = paste0("cutoff_", cutoff, "_labels"))
+}
+
+```
+
+```{r integrating CytoTRACE annotations to Steele et al. dataset}
+obj <-TotalTissue.combined.harmony_fil
+
+to_add <- as.data.frame(epi.integrated$cutoff_0.72_labels)
+
+obj <- AddMetaData(obj, metadata = to_add, col.name = "epi.cytoTRACE_0.72")
+
+obj$epi.cytoTRACE_0.72 <- as.factor(obj@meta.data[["epi.cytoTRACE_0.72"]])
+y <- (as.data.frame(obj$epi.cytoTRACE_0.72))
+x <- (as.data.frame(obj$Collapsed_labels))
+z <- row.names(x) == row.names(y)
+unique(z)
+xy <- cbind(x,y)
+str(xy) # check that columns are characters in order to remove NAs
+xy$`obj$Collapsed_labels` <- as.character(xy$`obj$Collapsed_labels`)
+xy$`obj$epi.cytoTRACE_0.72` <- as.character(xy$`obj$epi.cytoTRACE_0.72`)
+
+xy$`obj$epi.cytoTRACE_0.72`[is.na(xy$`obj$epi.cytoTRACE_0.72`)] <- xy$`obj$Collapsed_labels`[is.na(xy$`obj$epi.cytoTRACE_0.72`)]
+
+xy$relabeled <- xy$`obj$epi.cytoTRACE_0.72`
+xy$relabeled <- as.factor(xy$relabeled)
+
+xy$relabeled <- recode_factor(xy$relabeled,
+                              positive = "Epithelial_Cancer",
+                              negative = "Epithelial_Normal")
+
+xy_rm <- subset(xy, select = -c(1,2)) # removing first two column so not accidentally overwriting original annotations from that original slot
+
+obj <- AddMetaData(obj, metadata = xy_rm)
+
+```
+
+```{r CellChat analysis: AdjNorm samples}
+# Here we show the main functions used for CellChat analysis adapted from: 
+## Jin, S., Guerrero-Juarez, C.F., Zhang, L. et al. Inference and analysis of cell-cell communication using CellChat. Nat Commun 12, 1088 (2021). https://doi.org/10.1038/s41467-021-21246-9. 
+# For instruction on downloading files for the CellChat database, specific visualizations not in manuscript, and/or analysis pipeline, please refer to: https://htmlpreview.github.io/?https://github.com/jinworks/CellChat/blob/master/tutorial/CellChat-vignette.html
+
+options(stringsAsFactors = FALSE)
+options(future.globals.maxSize= 1000*1024^2)
+
+Idents(obj) <- obj$DiseaseState
+AdjNorm <- subset(obj, idents = "AdjNorm")
+Idents(AdjNorm) <- AdjNorm$relabeled
+levels(AdjNorm$relabeled)
+cellchat_AdjNorm <- createCellChat(AdjNorm, group.by = "relabeled", assay = "RNA") # create CellChat object
+cellchat_AdjNorm@idents
+
+cellchat <- cellchat_AdjNorm
+
+# set up the CellChat database (download database as described above)
+interaction_input <- read.csv(file = 'interaction_input_CellChatDB_updated.csv', row.names = 1)
+complex_input <- read.csv(file = 'complex_input_CellChatDB.csv', row.names = 1)
+cofactor_input <- read.csv(file = 'cofactor_input_CellChatDB.csv', row.names = 1)
+geneInfo <- read.csv(file = 'geneInfo_input_CellChatDB.csv', row.names = 1)
+CellChatDB <- list()
+CellChatDB$interaction <- interaction_input
+CellChatDB$complex <- complex_input
+CellChatDB$cofactor <- cofactor_input
+CellChatDB$geneInfo <- geneInfo
+# use all CellChatDB for cell-cell communication analysis
+CellChatDB.use <- CellChatDB # simply use the default CellChatDB
+length(unique(cellchat@DB$interaction$pathway_name))
+# set the used database in the object
+cellchat@DB <- CellChatDB.use
+# subset the expression data of signaling genes for saving computation cost
+cellchat <- CellChat::subsetData(object = cellchat) # This step is necessary even if using the whole database
+
+future::plan("multisession", workers = 4) # do parallel
+
+# run necessary CellChat functions for analysis and downstream visualizations
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+cellchat <- computeCommunProb(cellchat)
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+# Extract the inferred cellular communication network as a data frame
+df.net_LR <- subsetCommunication(cellchat) 
+df.net_SIG <- subsetCommunication(cellchat, slot.name = "netP") 
+
+cellchat <- computeCommunProbPathway(cellchat)
+cellchat@netP$prob
+cellchat <- aggregateNet(cellchat)
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") 
+
+library(ggalluvial)
+
+selectK(cellchat, pattern = "outgoing")
+nPatterns = 2
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "outgoing", k = nPatterns, height = 20)
+
+selectK(cellchat, pattern = "incoming")
+nPatterns = 3
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "incoming", k = nPatterns, height = 20)
+
+cellchat <- computeNetSimilarity(cellchat, type = "functional")
+cellchat <- netEmbedding(cellchat, type = "functional")
+cellchat <- netClustering(cellchat, type = "functional") # may have to use trace(netClustering, edit = T) to change "multicore" to "multisession" to run this function
+
+cellchat <- computeNetSimilarity(cellchat, type = "structural")
+cellchat <- netEmbedding(cellchat, type = "structural")
+cellchat <- netClustering(cellchat, type = "structural")
+
+cellchat_AdjNorm <- cellchat
+```
+
+```{r CellChat analysis: PDAC samples}
+# Here we show the main functions used for CellChat analysis adapted from: 
+## Jin, S., Guerrero-Juarez, C.F., Zhang, L. et al. Inference and analysis of cell-cell communication using CellChat. Nat Commun 12, 1088 (2021). https://doi.org/10.1038/s41467-021-21246-9. 
+# For instruction on downloading files for the CellChat database, specific visualizations not in manuscript, and/or analysis pipeline, please refer to: https://htmlpreview.github.io/?https://github.com/jinworks/CellChat/blob/master/tutorial/CellChat-vignette.html
+
+# read in Seurat object and subset PDAC samples for CellChat analysis
+Idents(obj) <- obj$DiseaseState
+PDAC <- subset(obj, idents = "PDAC")
+Idents(PDAC) <- PDAC$relabeled
+levels(PDAC$relabeled)
+cellchat_PDAC <- createCellChat(PDAC, group.by = "relabeled", assay = "RNA") # create CellChat object
+cellchat_PDAC@idents
+
+cellchat <- cellchat_PDAC
+
+# set up the CellChat database
+interaction_input <- read.csv(file = 'interaction_input_CellChatDB_updated.csv', row.names = 1)
+complex_input <- read.csv(file = 'complex_input_CellChatDB.csv', row.names = 1)
+cofactor_input <- read.csv(file = 'cofactor_input_CellChatDB.csv', row.names = 1)
+geneInfo <- read.csv(file = 'geneInfo_input_CellChatDB.csv', row.names = 1)
+CellChatDB <- list()
+CellChatDB$interaction <- interaction_input
+CellChatDB$complex <- complex_input
+CellChatDB$cofactor <- cofactor_input
+CellChatDB$geneInfo <- geneInfo
+# use all CellChatDB for cell-cell communication analysis
+CellChatDB.use <- CellChatDB # simply use the default CellChatDB
+length(unique(cellchat@DB$interaction$pathway_name))
+# set the used database in the object
+cellchat@DB <- CellChatDB.use
+# subset the expression data of signaling genes for saving computation cost
+cellchat <- CellChat::subsetData(object = cellchat) # This step is necessary even if using the whole database
+
+future::plan("multisession", workers = 4) # do parallel
+
+# run necessary CellChat functions for analysis and downstream visualizations
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+cellchat <- computeCommunProb(cellchat)
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+# Extract the inferred cellular communication network as a data frame
+df.net_LR <- subsetCommunication(cellchat) 
+df.net_SIG <- subsetCommunication(cellchat, slot.name = "netP") 
+
+cellchat <- computeCommunProbPathway(cellchat)
+cellchat@netP$prob
+cellchat <- aggregateNet(cellchat)
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") 
+
+library(ggalluvial)
+
+selectK(cellchat, pattern = "outgoing")
+nPatterns = 2
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "outgoing", k = nPatterns, height = 20)
+
+selectK(cellchat, pattern = "incoming")
+nPatterns = 3
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "incoming", k = nPatterns, height = 20)
+
+cellchat <- computeNetSimilarity(cellchat, type = "functional")
+cellchat <- netEmbedding(cellchat, type = "functional")
+cellchat <- netClustering(cellchat, type = "functional") 
+
+cellchat <- computeNetSimilarity(cellchat, type = "structural")
+cellchat <- netEmbedding(cellchat, type = "structural")
+cellchat <- netClustering(cellchat, type = "structural")
+
+cellchat_PDAC <- cellchat
+```
+
+```{r CellChat: comparing AdjNorm vs PDAC}
+# Here we show the main functions used for CellChat analysis adapted from: 
+## Jin, S., Guerrero-Juarez, C.F., Zhang, L. et al. Inference and analysis of cell-cell communication using CellChat. Nat Commun 12, 1088 (2021). https://doi.org/10.1038/s41467-021-21246-9. 
+# For specific visualizations not in manuscript or analysis pipeline, please refer to: https://htmlpreview.github.io/?https://github.com/jinworks/CellChat/blob/master/tutorial/Comparison_analysis_of_multiple_datasets.html
+
+# run analytic functions in CellChat pipeline to compare interactions between AdjNorm and PDAC samples
+## update cellchat object to compare tumor and normal
+cellchat_PDAC <- updateCellChat(cellchat_PDAC)
+cellchat_AdjNorm <- updateCellChat(cellchat_AdjNorm)
+
+cellchat_PDAC <- netAnalysis_computeCentrality(cellchat_PDAC)
+cellchat_AdjNorm <- netAnalysis_computeCentrality(cellchat_AdjNorm)
+
+object.list <- list(AdjNorm = cellchat_AdjNorm,
+                    PDAC = cellchat_PDAC)
+
+cellchat <- mergeCellChat(object.list, add.names = names(object.list), merge.data = T, cell.prefix = T) 
+
+gg1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
+gg2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2), measure = "weight")
+
+weight.max <- getMaxWeight(object.list, attribute = c("idents","count"))
+
+# Differential number of interactions or interaction strength among different cell types
+group.cellType <- c(rep("NK Cells", 1), 
+                    rep("Epithelial_Cancer", 1), 
+                    rep("Epithelial_Normal", 1), 
+                    rep("Fibroblast", 1))
+group.cellType <- factor(group.cellType, levels = c("NK Cells", 
+                                                    "Epithelial_Cancer", 
+                                                    "Epithelial_Normal", 
+                                                    "Fibroblast"))
+object.list <- lapply(object.list, function(x) {mergeInteractions(x, group.cellType)}) 
+cellchat <- mergeCellChat(object.list, add.names = names(object.list))
+
+cellchat <- computeNetSimilarityPairwise(cellchat, type = "functional")
+cellchat <- netEmbedding(cellchat, type = "functional")
+cellchat <- netClustering(cellchat, type = "functional")
+
+cellchat <- computeNetSimilarityPairwise(cellchat, type = "structural")
+cellchat <- netEmbedding(cellchat, type = "structural")
+cellchat <- netClustering(cellchat, type = "structural")
+
+rankSimilarity(cellchat, type = "functional")
+
+pos.dataset = "PDAC"
+features.name = pos.dataset
+cellchat <- identifyOverExpressedGenes(cellchat, group.dataset = "datasets", pos.dataset = pos.dataset, features.name = features.name, only.pos = FALSE, thresh.pc = 0.1, thresh.fc = 0.1, thresh.p = 1)
+net <- netMappingDEG(cellchat, features.name = features.name)
+net.up <- subsetCommunication(cellchat, net = net, datasets = "PDAC",ligand.logFC = 0.2, receptor.logFC = NULL)
+net.down <- subsetCommunication(cellchat, net = net, datasets = "AdjNorm",ligand.logFC = -0.1, receptor.logFC = -0.1)
+
+gene.up <- extractGeneSubsetFromPair(net.up, cellchat)
+gene.down <- extractGeneSubsetFromPair(net.down, cellchat)
+
+pairLR.use.up = net.up[, "interaction_name", drop = F]
+gg1 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.up, sources.use = c(1:4), targets.use = c(1:4), comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Up-regulated signaling in ", names(object.list)[2]))
+pairLR.use.down = net.down[, "interaction_name", drop = F]
+gg2 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.down, sources.use = c(1:4), targets.use = c(1:4), comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Down-regulated signaling in ", names(object.list)[2]))
+
+computeEnrichmentScore(net.down, scecies = 'human')
+
+up_ES_no_NA <- na.omit(net.up)
+computeEnrichmentScore(up_ES_no_NA, scecies = 'human')
+```
+
+```{r Figure 4A}
+object.list = list(PDAC = cellchat_PDAC,
+                   AdjNorm = cellchat_AdjNorm)
+
+gg <- list()
+for (i in 1:length(object.list)) {
+  gg[[i]] <- netAnalysis_signalingRole_scatter(object.list[[i]], title = names(object.list)[i])
+}
+
+gg[[i]] <- netAnalysis_signalingRole_scatter(object.list[[i]], title = names(object.list)[i])
+
+num.link <- sapply(object.list, function(x) {rowSums(x@net$count) + colSums(x@net$count)-diag(x@net$count)})
+x <- Reduce(rbind, lapply(gg, function(g){g[["data"]]}))
+View(x)
+x$DiseaseState <- c("PDAC", "PDAC", "PDAC", "PDAC", "AdjNorm", "AdjNorm", "AdjNorm", "AdjNorm")
+
+function (object, signaling = NULL, color.use = NULL, slot.name = "netP", 
+          group = NULL, weight.MinMax = NULL, dot.size = c(2, 6), point.shape = c(21, 22, 24, 23, 25, 8, 3), label.size = 3, dot.alpha = 0.6, 
+          x.measure = "outdeg", y.measure = "indeg", xlabel = "Outgoing interaction strength", 
+          ylabel = "Incoming interaction strength", title = NULL, font.size = 10, 
+          font.size.title = 10, do.label = T, show.legend = T, show.axes = T)
+  
+font.size = 10
+xlabel = "Outgoing interaction strength"
+ylabel = "Incoming interaction strength"
+color.use <- scPalette(4) # change based on levels of object
+color.use # can use the codes to rearrage the order of the colors if interested
+color.use <-c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3")
+color.use <- scPalette(4)
+
+ggplot(data = x, aes(x, y)) + 
+  geom_point(aes(size = Count,
+                 colour = labels, 
+                 fill = labels, 
+                 shape = DiseaseState)) + 
+  scale_colour_manual(values = color.use) + 
+  CellChat_theme_opts() + 
+  theme(text = element_text(size = font.size), 
+        legend.key.height = grid::unit(0.15, "in")) + 
+  labs(x = xlabel, y = ylabel) + 
+  theme(axis.line.x = element_line(size = 0.25), 
+        axis.line.y = element_line(size = 0.25))
+```
+
+```{r Figure 4B}
+levels(cellchat@idents$joint) # identify levels for cell types to choose approriate sources and targets
+rankNet(cellchat, mode = "comparison", stacked = F, do.stat = TRUE, sources.use = c(1,3), targets.use = c(4))
+```
+
+```{r Figure 4C}
+netVisual_bubble(cellchat, sources.use = c(1:4), targets.use = c(4), comparison = c(1, 2),  angle.x = 45, remove.isolate = T, signaling = c("COLLAGEN", "FN1", "LAMININ"))
+```
+
+```{r Figure 4D-G}
+Idents(obj) <- obj@meta.data$relabeled
+DefaultAssay(obj) <- "RNA"
+# Determine which genes from the identified L-R pairs are up- or down-regulated in epithelial cells, fibroblasts, and NK cells between disease states using the FindMarkers() function
+features <- c("CD44",              
+              "COL1A1",
+              "COL1A2",             
+              "COL4A1",
+              "COL4A2",
+              "COL6A1",
+              "COL6A2",
+              "COL6A3",
+              "COL9A3",
+              "FN1",
+              "ITGA4",
+              "ITGB1",
+              "ITGB7",
+              "LAMA2",
+              "LAMA3",
+              "LAMA4",
+              "LAMA5",
+              "LAMB1",
+              "LAMB2",
+              "LAMB3",
+              "LAMC1",
+              "LAMC2") 
+
+deg_NK <- FindMarkers(obj, 
+                      ident.1 = "PDAC", 
+                      ident.2 = "AdjNorm",
+                      group.by = "DiseaseState", 
+                      verbose = TRUE, 
+                      subset.ident = "NK Cells", 
+                      features = features)
+
+deg_epi <- FindMarkers(obj, 
+                      ident.1 = "PDAC", 
+                      ident.2 = "AdjNorm",
+                      group.by = "DiseaseState", 
+                      verbose = TRUE, 
+                      subset.ident = "Epithelial_Normal", 
+                      features = features)
+
+deg_epi_can <- FindMarkers(obj, 
+                      ident.1 = "PDAC", 
+                      ident.2 = "AdjNorm",
+                      group.by = "DiseaseState", 
+                      verbose = TRUE, 
+                      subset.ident = "Epithelial_Cancer", 
+                      features = features)
+
+deg_fib <- FindMarkers(obj, 
+                      ident.1 = "PDAC", 
+                      ident.2 = "AdjNorm",
+                      group.by = "DiseaseState", 
+                      verbose = TRUE, 
+                      subset.ident = "Fibroblast", 
+                      features = features)
+
+# Plot differentially expressed genes from each cell population with an adjusted p-value < 0.01
+Idents(obj) <- obj$relabeled
+epi_can <- subset(obj, idents = "Epithelial_Cancer")
+Idents(epi_can) <- epi_can$DiseaseState
+VlnPlot(epi_can, features = c("CD44"), ncol = 2, pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+
+epi <- subset(obj, idents = "Epithelial_Normal")
+Idents(epi) <- epi$DiseaseState
+VlnPlot(epi, features = c("CD44"), pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+
+fib <- subset(obj, idents = "Fibroblast")
+Idents(fib) <- fib$DiseaseState
+VlnPlot(fib, features = c("CD44"), ncol = 4, pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+
+NK <- subset(obj, idents = "NK Cells")
+Idents(NK) <- NK$DiseaseState
+VlnPlot(NK, features = c("CD44"), pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+```
+
+# Supplementary Figures
+## Supplementary Figure S1
+```{r Supplementary Figure S1}
+# averaged heatmap of all cell subclusters with all IMC markers
+features <- c("pankeratin", 
+              "Ecadherin", 
+              "aSMA",
+              "FAP", 
+              "vimentin", 
+              "CD45RO",
+              "CD3", 
+              "CD4", 
+              "CD8a", 
+              "FoxP3", 
+              "CD11b",
+              "CD68", 
+              "CD20", 
+              "CD16", 
+              "CD56", 
+              "NKp44",
+              "NKG2D",
+              "CD107a",
+              "CD69",
+              "HLA-A1",
+              "HLA-ABC",
+              "IFNg",
+              "Ki67",
+              "MICA",
+              "PCNA",
+              "PD1",
+              "PDL1",
+              "TGFb",
+              "cl-caspase-3",
+              "granzyme-B",
+              "perforin",
+              "collagen-I") # select all markers from IMC panel
+
+subcluster_mean <- aggregateAcrossCells(as(sce, "SingleCellExperiment"),  
+                                      ids = sce$subcluster, 
+                                      statistics = "mean",
+                                      use.assay.type = "logcounts")
+
+dittoHeatmap(subcluster_mean, 
+             annot.by = "subcluster", 
+             cluster_rows = F, 
+             features = features,
+             heatmap.colors = colorRampPalette(c("#67001F", "#F7F7F7", "#053061"))(50))
+```
+
+## Supplementary Figure S2
+```{r Supplementary Figure S2}
+# CN spatial plots per IMC image
+S2 <- plotSpatial(sce, 
+                  node_color_by = "cn_subcluster", 
+                  img_id = "Case_Number", 
+                  node_size_fix = 0.5,
+                  coords = c("X_position.1", "Y_position.1")) + scale_color_brewer(palette = "Set3")
+S2 # view the plots
+```
+
+## Supplementary Figure S3
+```{r Supplementary Figure S3}
+SF3 <- colData(sce) %>% as_tibble() %>%
+  group_by(cn_subcluster, subcluster) %>%
+  dplyr::summarize(count = n(), .groups = "drop")
+
+write.csv(SF3, file = "SF3_df.csv") # open file to graph data in GraphPad Prism
+```
+
+## Supplementary Figure S7
+```{r Supplementary Figure S7A}
+Idents(obj) <- obj$Collapsed_labels
+length(unique(obj$Collapsed_labels))
+cols <- dittoColors()[1:13]
+DimPlot(obj, cols = cols, order = c("Acinar", "B Cells", "CD4 T Cells", "CD8 T Cells", "Dendritic Cell", "Endocrine", "Endothelial", "Epithelial", "Fibroblast", "Mast Cells", "Myeloid", "NK Cells", "Plasma Cells"))
+
+dim_plot <- DimPlot(obj, cols = dittoColors()[1:13])
+
+dim_plot$data$ident <- factor(x = dim_plot$data$ident, levels = c("Acinar", "B Cells", "CD4 T Cells", "CD8 T Cells", "Dendritic Cell", "Endocrine", "Endothelial", "Epithelial", "Fibroblast", "Mast Cells", "Myeloid", "NK Cells", "Plasma Cells"))
+
+FeaturePlot(epi, features = "results.CytoTRACE")
+```
+
+```{r Supplementary Figure S7B}
+Idents(epi) <- epi$ID
+DimPlot(epi, reduction = "umap_epi")
+```
+
+```{r Supplementary Figure S7C}
+Idents(epi.integrated) <- epi.integrated$ID
+DimPlot(epi.integrated, reduction = "umap_epi_int")
+```
+
+```{r Supplementary Figure S7D}
+FeaturePlot(epi.integrated, features = "results.CytoTRACE", reduction = "umap_epi_int")
+```
+
+```{r Supplementary Figure S7E}
+msEst <- mstep(modelName = "V", data = epi.integrated$results.CytoTRACE, z = epi.integrated$results.CytoTRACE)
+mixmodel <- em(epi.integrated$results.CytoTRACE,"normal","normal")
+hist(epi.integrated$results.CytoTRACE,10,F)  # generates histogram of CytoTRACE scores from integrated epithelial data
+lines(mixmodel,lwd=1.5,col="red")
+abline(v=msEst$parameters$pro,lty=2,col="blue")
+```
+
+```{r Supplementary Figure S7F}
+Idents(obj) <- obj$relabeled
+
+dim_plot <- DimPlot(obj, cols = dittoColors()[1:14])
+
+dim_plot$data$ident <- factor(x = dim_plot$data$ident, levels = c("Acinar", "B Cells", "CD4 T Cells", "CD8 T Cells", "Dendritic Cell", "Endocrine", "Endothelial", "Epithelial_Cancer", "Epithelial_Normal", "Fibroblast", "Mast Cells", "Myeloid", "NK Cells", "Plasma Cells")) # change the order of the factor levels
+
+dim_plot
+```
+
+```{r Supplementary Figure S7G}
+dittoBarPlot(obj, var = "relabeled", group.by = "ID", split.by = "DiseaseState")
+```
+
+## Supplementary Figure 8
+```{r Supplementary Figure S8A}
+# Plot differentially expressed genes from each cell population with an adjusted p-value < 0.01
+Idents(obj) <- obj$relabeled
+epi_can <- subset(obj, idents = "Epithelial_Cancer")
+Idents(epi_can) <- epi_can$DiseaseState
+VlnPlot(epi_can, features = rownames(deg_epi_can), ncol = 2, pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+```
+
+```{r Supplementary Figure S8B}
+epi <- subset(obj, idents = "Epithelial_Normal")
+Idents(epi) <- epi$DiseaseState
+VlnPlot(epi, features = c("LAMC2"), pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+```
+
+```{r Supplementary Figure S8C}
+fib <- subset(obj, idents = "Fibroblast")
+Idents(fib) <- fib$DiseaseState
+VlnPlot(fib, features = rownames(deg_fib), ncol = 4, pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+```
