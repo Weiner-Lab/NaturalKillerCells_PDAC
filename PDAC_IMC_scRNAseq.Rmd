@@ -1,5 +1,5 @@
 ---
-title: "Natural killer cells associate with malignant epithelial cells in the pancreatic ductal adenocarcinoma tumor microenvironment"
+title: "NK cell co-localization with epithelial cells in pancreatic cancer is influenced by fibroblasts and ECM components"
 ---
 
 ```{r setup, include=FALSE}
@@ -58,8 +58,8 @@ library(readxl)
 sessionInfo()
 ```
 
-# Data transformation and munging for `PDAC_IMC` and `PDAC_sce` objects to generate figures within this manuscript
-## all datasets for downstream analyses are deposited at doi: 10.5281/zenodo.10582038
+# Imaging mass cytometry (IMC)-based data transformation and munging for `PDAC_IMC` and `PDAC_sce` objects to generate relevant figures within this manuscript
+## all IMC-based datasets for downstream analyses are deposited at doi: 10.5281/zenodo.10582038
 ```{r histoCAT-derived IMC single cell data transformation and munging}
 # Loading files and data munging 
 path <- "~/custom_gates_0"
@@ -902,50 +902,94 @@ DimPlot(PDAC,
 ```
 
 ```{r Figure 1C}
-sce <- "PDAC_sce.RDS" # load in SingleCellExperiment object of annotated IMC single cell data from PDAC patients
+obj <- PDAC
+dat <- as.matrix(GetAssayData(obj, assay = "RNA", layer = "data"))
 
-cols <- dittoColors(reps = 29, get.names = F)
-length(unique(levels(sce$cellType)))
-cols[1:8] # view colors to assign to cell types
+# prep for single-cell heatmap
+set.seed(123)
+cn <- colnames(dat)
+keep_names <- sample(cn, 15000) # sub-sample 15k cells
+dat_subset <- dat[c("pankeratin",
+                     "Ecadherin",
+                     "FAP",
+                     "aSMA",
+                     "vimentin",
+                     "CD68", 
+                     "CD16",
+                     "CD11b",
+                     "CD56",
+                     "NKG2D",
+                     "CD45RO",
+                     "CD3",
+                     "CD4",
+                     "CD8a",
+                     "CD20"
+                    ), keep_names]
 
-# Create Heatmap objects
-features <- c("pankeratin", 
-              "Ecadherin", 
-              "aSMA",
-              "FAP", 
-              "vimentin", 
-              "CD45RO",
-              "CD20",
-              "CD3", 
-              "CD4", 
-              "CD8a", 
-              "FoxP3", 
-              "CD11b",
-              "CD68", 
-              "CD16",
-              "CD56", 
-              "NKp44",
-              "NKG2D")
+meta_sub <- obj@meta.data[colnames(dat_subset), c("cellType", "TMA")]
+meta_sub$cellType <- as.factor(meta_sub$cellType)
 
-celltype_mean <- aggregateAcrossCells(as(sce, "SingleCellExperiment"),  
-                                      ids = sce$cellType, 
-                                      statistics = "mean",
-                                      use.assay.type = "logcounts", 
-                                      subset.row = features)
+# reorder cell types...
+old_lvls <- levels(meta_sub$cellType)
+last     <- old_lvls[length(old_lvls)]
+rest     <- old_lvls[-length(old_lvls)]
+new_lvls <- append(rest, last, after = 1)
+meta_sub$cellType <- factor(meta_sub$cellType, levels = new_lvls)
+meta_sub$TMA <- as.factor(meta_sub$TMA)
 
-dittoHeatmap(celltype_mean, 
-             annot.by = "cellType", 
-             annot.colors = c("#CC79A7", #epithelial
-                              "#0072B2", # aSMA+ fibroblast
-                              "#56B4E9", # FAP+ fibroblast
-                              "#666666", # B cell
-                              "#009E73", # macrophage
-                              "#E69F00", # CD4+ T cell
-                              "#D55E00", # CD8+ T cell
-                              "#F0E442"), # NK cell
-             cluster_rows = F, 
-             genes = features,
-             heatmap.colors = colorRampPalette(c("darkblue", "white", "darkred"))(50))
+# prepare colors
+celltype_levels <- levels(meta_sub$cellType)
+origid_levels   <- levels(meta_sub$TMA)
+celltype_colors <- setNames(
+  brewer.pal(n = length(celltype_levels), "Dark2"),
+  celltype_levels
+)
+
+base_pal <- brewer.pal(min(12, n_levels), "Set3")
+
+# Use colorRampPalette to interpolate up to n_levels colors
+origid_colors <- setNames(
+  colorRampPalette(base_pal)(n_levels),
+  origid_levels
+)
+
+# order by celltype
+ord <- order(meta_sub$cellType)
+mat_ord     <- dat_subset[, ord]
+meta_sub_ord <- meta_sub[ord, , drop = FALSE]
+
+# ordered annotation
+ha_ord <- HeatmapAnnotation(
+  df = meta_sub_ord,
+  col = list(
+    cellType  = celltype_colors,
+    orig.ident = origid_colors
+  )
+)
+
+# scale rows, i.e. ab specific z-scores
+mat_ord <- t(scale(t(mat_ord)))
+
+# adjust color scaling
+library(scales)
+col_fun_tight <- colorRamp2(
+  breaks = c(-2, 0, +2),
+  colors = c(muted("blue"), "lightgray", "red")
+)
+
+Heatmap(
+  mat_ord,
+  col = col_fun_tight,
+  name             = "Z-score",            
+  cluster_rows     = FALSE,                 
+  cluster_columns  = FALSE,
+  show_row_names   = TRUE,
+  show_column_names= FALSE,
+  top_annotation   = ha_ord, 
+  height = unit(3, "in"), 
+  width = unit(2, "in"), 
+  use_raster = F
+)
 ```
 
 ```{r Figure 1D}
@@ -1041,33 +1085,9 @@ p1 <- plotCells(mask = sub_masks,
 ```
 
 ## Figure 2
-```{r Figure 2B}
+```{r Figure 2D}
 sce <- "PDAC_sce.RDS" # load in SingleCellExperiment object of annotated IMC single cell data from PDAC patients
 
-
-sce <- buildSpatialGraph(sce, img_id = "ImageId", type = "knn", k = 15, coords = c("X_position", "Y_position"))
-
-sce <- aggregateNeighbors(sce, colPairName = "knn_interaction_graph", 
-                          aggregate_by = "metadata", count_by = "subcluster")
-
-set.seed(220705)
-
-cn_1 <- kmeans(sce$aggregatedNeighbors, centers = 8) # can adjust the number of neighbors here
-sce$cn_subcluster <- as.factor(cn_1$cluster)
-
-for_plot <- colData(sce) %>% as_tibble() %>%
-  group_by(cn_subcluster, subcluster) %>%
-  dplyr::summarize(count = n(), .groups = "drop") %>%
-  mutate(freq = count / sum(count)) %>%
-  pivot_wider(id_cols = cn_subcluster, names_from = subcluster, 
-              values_from = freq, values_fill = 0) %>%
-  ungroup() %>%
-  select(-cn_subcluster)
-
-pheatmap(for_plot, color = colorRampPalette(c("darkblue", "white", "darkred"))(100), scale = "column", legend = T, labels_row = row.names(for_plot))
-```
-
-```{r Figure 2C}
 out <- testInteractions(sce,
                         group_by = "Case_Number", # CHECK IS THIS IS CORRECT
                         label = "subcluster", 
@@ -1109,7 +1129,7 @@ interaction_sub <- subcluster_interactions %>% as_tibble() %>%
 interaction_sub
 ```
 
-```{r Figure 2D Analysis: Distance Analysis}
+```{r Figure 2E Analysis: Distance Analysis}
 cellType_levels <- unique(sce$cellType)
 legendctype <- as.data.frame(cbind(paste0("ctype",1:length(cellType_levels)),levels(cellType_levels))) # cell type legend
 
@@ -1201,7 +1221,7 @@ mat_P_mx # distance matrix from patient of interest. Save as a .csv file and plo
 # repeat lines 1186-1200 for all patient samples
 ```
 
-```{r Figure 2E Analysis: Network Analyses}
+```{r Figure 2F Analysis: Network Analyses}
 subcluster_levels <- unique(sce$subcluster)
 
 # Calculate cell counts and proportions for network graph nodes #####
@@ -1372,7 +1392,7 @@ expr_k_m_rm0<-expr_k_m[,colnames(expr_k_m) %nin% colnames(expr_k_m)[colSums(expr
 mat_P = aggregate(x=expr_k_m_rm0, by=list(rownames(expr_k_m_rm0)), FUN=mean, na.rm=T) # move on to Figure 2E
 ```
 
-```{r Figure 2E}
+```{r Figure 2F}
 mat <- readRDS(file = "mat.RDS") # import distance matrix data of all subclusters from all PDAC images
 
 # munge data to a distance matrix
@@ -1470,8 +1490,8 @@ g <- qgraph(1/dist_P,
                                       ncol = 3) 
 ```
 
-## Figure 3
-```{r Figure 3A-C Analysis: CellSelector}
+## Figure 4
+```{r Figure 4C-F Analysis: CellSelector}
 # filter original info for cells present in IMC seurat obj
 dataSet$ROI_CellId <- paste0(dataSet$ImageId, "_", dataSet$CellId)
 subDataSet <- subset(dataSet, dataSet$ROI_CellId %in% colnames(PDAC))
@@ -1531,80 +1551,186 @@ write.csv(counts, file = "image_i_duct_x_cells_subcluster_counts.csv") # open fi
 # image_duct and quartile information are also in the PDAC_IMC.RDS and PDAC_sce.RDS objects
 ```
 
-```{r Figure 3G}
-features <- c("CD69",
-              "CD107a",
-              "granzyme-B",
-              "IFNg",
-              "perforin",
-              "Ki67",
-              "PCNA",
-              "TGFb",
-              "cl-caspase-3",
-              "collagen-I",
-              "MICA",
-              "HLA-ABC",
-              "HLA-A1",
-              "PD1",
-              "PDL1") # select functional markers from IMC panel
-
-Idents(PDAC) <- PDAC$cellType
-
+```{r Figure 4G-J}
 NK_roi <- subset(PDAC, idents = "NK cell")
 Idents(NK_roi) <- NK_roi$ROI_Quar
-
-NK_roi_sce <- as.SingleCellExperiment(NK_ROI)
-NK <- aggregateAcrossCells(as(NK_roi_sce, "SingleCellExperiment"),  
-                               ids = NK_roi_sce$ROI_Quar, 
-                               statistics = "mean",
-                               use.assay.type = "logcounts", 
-                               subset.row = features)
-dittoHeatmap(NK, annot.by = "ROI_Quar", features = features, cluster_rows = F, heatmap.colors = colorRampPalette(c("darkblue", "white", "darkred"))(50))
-```
-
-```{r Figure 3H-K}
-Idents(NK_roi) <- NK_roi$ROI_Quar
+VlnPlot(NK_roi, features = c("CD69", "CD107a", "IFNg", "granzyme-B"), ncol = 2, idents = c("Q1", "Q4", "stroma"), pt.size = 0, dittoColors()[1:3])
+VlnPlot(NK_roi, features = c("CD69", "CD107a", "IFNg", "granzyme-B"), ncol = 2, idents = c("Q1", "Q4", "stroma"), pt.size = 0, dittoColors()[1:3])
+VlnPlot(NK_roi, features = c("CD69", "CD107a", "IFNg", "granzyme-B"), ncol = 2, idents = c("Q1", "Q4", "stroma"), pt.size = 0, dittoColors()[1:3])
 VlnPlot(NK_roi, features = c("CD69", "CD107a", "IFNg", "granzyme-B"), ncol = 2, idents = c("Q1", "Q4", "stroma"), pt.size = 0, dittoColors()[1:3])
 ```
 
-```{r Figure 3L}
-features <- c("CD69",
-              "CD107a",
-              "granzyme-B",
-              "IFNg",
-              "perforin",
-              "Ki67",
-              "PCNA",
-              "TGFb",
-              "cl-caspase-3",
-              "collagen-I",
-              "MICA",
-              "HLA-ABC",
-              "HLA-A1",
-              "PD1",
-              "PDL1") # select functional markers from IMC panel
+## Figure 5
+```{r fibroblast subclustering}
+# The PDAC scRNAseq dataset was previously published at doi: 10.1038/s43018-020-00121-4 
+Idents(TotalTissue.combined.harmony_fil) <- 'Expanded_labels' # publicly available scRNAseq dataset 
+levels(TotalTissue.combined.harmony_fil)
+fibroblasts <- subset(TotalTissue.combined.harmony_fil, idents = c("Fibroblasts"))
 
-Idents(PDAC) <- PDAC$cellType
+DimPlot(fibroblasts, label = T)
+DimPlot(fibroblasts, reduction = "umap", group.by = "ID")
+DimPlot(fibroblasts, reduction = "umap", group.by = "DiseaseState")
 
-epi_roi <- subset(PDAC, idents = "epithelial")
+ElbowPlot(fibroblasts, ndims = 50)
 
-epi_roi_sce <- as.SingleCellExperiment(epi_ROI)
-epi <- aggregateAcrossCells(as(epi_roi_sce, "SingleCellExperiment"),  
-                               ids = epi_roi_sce$ROI_Quar, 
-                               statistics = "mean",
-                               use.assay.type = "logcounts", 
-                               subset.row = features)
-dittoHeatmap(epi, annot.by = "ROI_Quar", features = features, cluster_rows = F, heatmap.colors = colorRampPalette(c("darkblue", "white", "darkred"))(50))
+# Find number of PCs that gives 90% variance
+st_dev <-fibroblasts@reductions$pca@stdev
+var <- st_dev^2
+sum(var[1:31])/sum(var)
+
+# Find neighbors and clusters
+fibroblasts <- FindNeighbors(fibroblasts, dims = 1:31)
+fibroblasts <- FindClusters(fibroblasts, resolution = seq(from = 0.5, to = 1, by = 0.1))
+fibroblasts <- RunUMAP(fibroblasts, dims = 1:31)
+
+head(fibroblasts)
+# Clustree res = 0.6
+clustree::clustree(fibroblasts, prefix = "RNA_snn_res.")
+
+fibroblasts <- FindNeighbors(fibroblasts, dims = 1:31)
+fibroblasts <- FindClusters(fibroblasts, resolution = 0.6)
+fibroblasts <- RunUMAP(fibroblasts, dims = 1:31)
+
+p1 <- DimPlot(fibroblasts, reduction = "umap", group.by = "DiseaseState")
+p1
+p2 <- DimPlot(fibroblasts, reduction = "umap", label = TRUE)
+p2
+plot_grid(p1, p2)
+DimPlot(fibroblasts, reduction = "umap", split.by = "DiseaseState", label = TRUE)
+DimPlot(fibroblasts, reduction = "pca", group.by = "DiseaseState")
+
+
+# Find all fibroblast markers
+fibroblasts.all.markers <- FindAllMarkers(object = fibroblasts)
+head(fibroblasts.all.markers)
+
+# Heatmap for top 10 markers for each cluster
+fibroblasts.all.markers %>% 
+  group_by(cluster) %>% 
+  dplyr::filter(avg_log2FC > 1) %>%
+  slice_head(n = 10) %>%
+  ungroup() -> top10
+DoHeatmap(fibroblasts, features = top10$gene) + NoLegend()
+
+# Top 10 fibroblast markers
+top.10.fibroblast.markers <- as.data.frame(fibroblasts.all.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC))
+head(top.10.fibroblast.markers)
+
+# Find markers for every cluster compared to all remaining cells, report only the positive ones
+fibroblast.positive.markers <- FindAllMarkers(object = fibroblasts, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+head(fibroblast.positive.markers)
+
+# Top 10 fibroblast positive markers
+top.10.fibroblast.positive.markers <- as.data.frame(fibroblast.positive.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC))
+head(top.10.fibroblast.positive.markers)
+
+# Heatmap for top 10 positive markers for each cluster
+fibroblast.positive.markers %>% 
+  group_by(cluster) %>% 
+  dplyr::filter(avg_log2FC > 1) %>%
+  slice_head(n = 10) %>%
+  ungroup() -> top10
+DoHeatmap(fibroblasts, features = top10$gene) + NoLegend()
+
+# Top 10 DE fibroblast markers by disease state
+top.10.DE.fibroblast.markers.diseasestate <- as.data.frame(fibroblasts.all.markers %>% group_by("DiseaseState") %>% top_n(n = 10, wt = avg_log2FC))
+top.10.DE.fibroblast.markers.diseasestate
+
+# panCAF markers Elyada et al
+VlnPlot(fibroblasts, features = c("COL1A1", "FAP", "PDPN", "DCN", "VIM", "DCN", "PDGFRA"))
+
+# iCAF markers Elyada et al, cancer discovery, august 2019
+FeaturePlot(fibroblasts, features = c("DCN", "PDGFRA", "CFD", "DPT", "AGTR1", "CXCL12", "IL8","CCL2"))
+VlnPlot(fibroblasts, features = c("DCN", "PDGFRA", "CFD", "DPT", "AGTR1", "CXCL12", "IL8","CCL2", "COL14A1"))
+RidgePlot(fibroblasts, features = c("DCN", "PDGFRA", "CFD", "DPT", "AGTR1", "CXCL12", "IL8","CCL2"))
+DotPlot(fibroblasts, features = c("DCN", "PDGFRA", "CFD", "DPT", "AGTR1", "CXCL12", "IL8","CCL2")) + RotatedAxis()
+DoHeatmap(fibroblasts, features = c("DCN", "PDGFRA", "CFD", "DPT", "AGTR1", "CXCL12", "IL8","CCL2"))
+
+# myCAF markers Elyada et al, cancer discovery, august 2019http://127.0.0.1:20413/graphics/plot_zoom_png?width=1458&height=876
+FeaturePlot(fibroblasts, features = c("ACTA2", "TAGLN", "FAP", "MMP11", "HOPX", "POSTN", "COL12A1", "THBS2", "IGFBP3", "THY1"))
+VlnPlot(fibroblasts, features = c("ACTA2", "TAGLN", "FAP", "MMP11", "HOPX", "POSTN", "COL12A1", "THBS2", "IGFBP3", "THY1"))
+RidgePlot(fibroblasts, features = c("ACTA2", "TAGLN", "FAP", "MMP11", "HOPX", "POSTN", "COL12A1"))
+DotPlot(fibroblasts, features = c("ACTA2", "TAGLN", "FAP", "MMP11", "HOPX", "POSTN", "COL12A1")) + RotatedAxis()
+DoHeatmap(fibroblasts, features = c("ACTA2", "TAGLN", "FAP", "MMP11", "HOPX", "POSTN", "COL12A1"))
+
+# apCAF markers Elyada et al, cancer discovery, august 2019
+FeaturePlot(fibroblasts, features = c("HLA-DRA", "HLA-DPA1", "HLA-DQA1"))
+VlnPlot(fibroblasts, features = c("CD74","SLPI", "HLA-DRA", "HLA-DPA1", "HLA-DQA1", "XBP1"))
+VlnPlot(fibroblasts, features = c("HLA-DRA", "HLA-DPA1", "HLA-DQA1"))
+
+# stellate-like CAF markers (Wang, Y., Liang, Y., Xu, H. et al. Single-cell analysis of pancreatic ductal adenocarcinoma
+#identifies a novel fibroblast subtype associated with poor prognosis but better immunotherapy response.
+# Cell Discov 7, 36 (2021). https://doi.org/10.1038/s41421-021-00271-4)
+VlnPlot(fibroblasts, features = c("MYH11", "RGS5"))
+
+# Assigning cell type identity to clusters
+levels(fibroblasts)
+new.cluster.ids <- c("myCAF", "myCAF", "Fibroblasts_Normal", "myCAF", "myCAF", "myCAF", "Stellate-like CAF", "iCAF", "myCAF","apCAF")
+names(new.cluster.ids) <- levels(fibroblasts)
+fibroblasts <- RenameIdents(fibroblasts, new.cluster.ids)
+DimPlot(fibroblasts, label = T)
+
+# Filter fibroblasts
+fibroblasts_fil <- subset(fibroblasts, idents = c("myCAF", "iCAF", "apCAF", "Stellate-like CAF"))
+levels(fibroblasts_fil)
+head(fibroblasts_fil)
+
+# Save filtered fibroblasts file
+save(fibroblasts_fil, file = "fibroblasts_fil.RData")
+
+# Find all  markers for filtered fibroblasts
+fibroblasts_fil_all_markers <- FindAllMarkers(fibroblasts_fil)
+head(fibroblasts_fil_all_markers)
+
+# Find all positive markers for filtered fibroblasts
+fibroblasts_fil_markers <- FindAllMarkers(fibroblasts_fil, only.pos = T)
+head(fibroblasts_fil_markers)
+
+# Top 10 fibroblasts filtered markers
+fibroblasts_fil_markers %>% 
+  group_by(cluster) %>% 
+  dplyr::filter(avg_log2FC > 1) %>%
+  slice_head(n = 10) %>%
+  ungroup() -> top10
+DoHeatmap(fibroblasts_fil, features = top10$gene) + NoLegend()
+
+DimPlot(fibroblasts_fil, label = T, split.by = "DiseaseState")
+DimPlot(fibroblasts_fil, label = T, group.by = "DiseaseState")
+DimPlot(fibroblasts_fil, reduction = "pca", group.by = "DiseaseState")
+
+# Find differentially expressed fibroblast markers
+#myCAF v iCAF
+fibroblasts_fil_myCAF_iCAF_de_markers <- FindMarkers(fibroblasts_fil, ident.1 = "myCAF", ident.2 = "iCAF", test.use = "MAST", only.pos = TRUE)
+head(fibroblasts_fil_myCAF_iCAF_de_markers)
+
+# Visualize marker genes in identified fibroblast subclusters
+pan.caf.markers <- c("COL1A1", "FAP", "PDPN", "DCN", "VIM")
+VlnPlot(fibroblasts_fil, features = pan.caf.markers)
+h1 <- DoHeatmap(fibroblasts_fil, features = pan.caf.markers) + ylab("Pan-CAF Markers")
+h2 <- DoHeatmap(fibroblasts_fil, features = pan.caf.markers, group.by = "DiseaseState") + ylab("Pan-CAF Markers")
+plot_grid(h1, h2)
+
+icaf.markers <- c("CFD", "DPT", "AGTR1", "CXCL12", "IL8","CCL2")
+VlnPlot(fibroblasts_fil, features = icaf.markers)
+h1.2 <- DoHeatmap(fibroblasts_fil, features = icaf.markers) + ylab("iCAF Markers")
+h2.2 <- DoHeatmap(fibroblasts_fil, features = icaf.markers, group.by = "DiseaseState") + ylab("iCAF Markers")
+plot_grid(h1.2, h2.2)
+
+mycaf.markers <- c("ACTA2", "TAGLN", "FAP", "MMP11", "HOPX", "POSTN", "COL12A1", "THBS2", "IGFBP3", "THY1")
+VlnPlot(fibroblasts_fil, features = mycaf.markers)
+
+apcaf.markers <- c("HLA-DRA", "HLA-DPA1", "HLA-DQA1")
+VlnPlot(fibroblasts_fil, features = apcaf.markers)
+
+stellate.likecaf.markers <- c("MYH11", "RGS5")
+VlnPlot(fibroblasts_fil, features = stellate.likecaf.markers)
 ```
 
-## Figure 4
-```{r CytoTRACE analysis}
+```{r CytoTRACE analysis of epithelial cells}
 # Here we show the main functions used for CytoTRACE analysis adapted from: 
 ## Gunsagar S. Gulati et al. ,Single-cell transcriptional diversity is a hallmark of developmental potential.Science367,405-411(2020).DOI:10.1126/science.aax0249
 
 # The PDAC scRNAseq dataset was previously published at doi: 10.1038/s43018-020-00121-4 
-
-load(file = "TotalTissue090320.RData") # load the Steele et al. PDAC scRNAseq dataset
 counts_matrix <- as.data.frame(GetAssayData(TotalTissue.combined.harmony_fil, slot = "counts"))
 
 # Extract cell-type annotations from Seurat object
@@ -1674,7 +1800,7 @@ DefaultAssay(epi.integrated) <- "integrated"
 epi.integrated <- ScaleData(epi.integrated, verbose = FALSE)
 epi.integrated <- RunPCA(epi.integrated, verbose = FALSE)
 epi.integrated <- FindNeighbors(epi.integrated, dims = 1:50)
-epi.integrated <- FindClusters(epi.integrated, resolution = seq(from = 0.1, to = 0.5, by = 0.1))
+epi.integrated <- FindClusters(epi.integrated, resolution = seq(from = 0.7, to = 0.75, by = 0.01))
 epi.integrated <- RunUMAP(epi.integrated, dims = 1:50, reduction.name = "umap_epi_int", n.neighbors = 50, min.dist = 0.05)
 
 clustree::clustree(epi.integrated, prefix = "integrated_snn_res.", node_colour = "results.CytoTRACE", node_colour_aggr = "mean")
@@ -1712,36 +1838,53 @@ for (cutoff in cutoff) {
 
 ```
 
-```{r integrating CytoTRACE annotations to Steele et al. dataset}
-obj <-TotalTissue.combined.harmony_fil
+```{r integrating CytoTRACE and fibroblast annotations to Steele et al. dataset}
+obj <- TotalTissue.combined.harmony_fil
+
+obj$subclusters <- as.factor(obj$Expanded_labels) # copy metadata slot of original annotations that will be changed to include all new subcluster information
 
 to_add <- as.data.frame(epi.integrated$cutoff_0.72_labels)
+to_add_2 <- as.data.frame(Idents(fibroblasts_fil))
 
 obj <- AddMetaData(obj, metadata = to_add, col.name = "epi.cytoTRACE_0.72")
+obj <- AddMetaData(obj, metadata = to_add_2, col.name = "fibroblast_subclusters")
 
 obj$epi.cytoTRACE_0.72 <- as.factor(obj@meta.data[["epi.cytoTRACE_0.72"]])
+obj$firoblast_subclusters <- as.factor(obj@meta.data[["fibroblast_subclusters"]])
+
 y <- (as.data.frame(obj$epi.cytoTRACE_0.72))
-x <- (as.data.frame(obj$Collapsed_labels))
+x <- (as.data.frame(obj$subclusters))
+a <- (as.data.frame(obj$fibroblast_subclusters))
 z <- row.names(x) == row.names(y)
+zz <- row.names(x) == row.names(a)
+zzz <- row.names(y) == row.names(a)
+
 unique(z)
-xy <- cbind(x,y)
-str(xy) # check that columns are characters in order to remove NAs
-xy$`obj$Collapsed_labels` <- as.character(xy$`obj$Collapsed_labels`)
-xy$`obj$epi.cytoTRACE_0.72` <- as.character(xy$`obj$epi.cytoTRACE_0.72`)
+unique(zz)
+unique(zzz)
 
-xy$`obj$epi.cytoTRACE_0.72`[is.na(xy$`obj$epi.cytoTRACE_0.72`)] <- xy$`obj$Collapsed_labels`[is.na(xy$`obj$epi.cytoTRACE_0.72`)]
+xya <- cbind(x,y,a)
+str(xya) # check that columns are characters in order to remove NAs
+xya$`obj$subclusters` <- as.character(xya$`obj$subclusters`)
+xya$`obj$epi.cytoTRACE_0.72` <- as.character(xya$`obj$epi.cytoTRACE_0.72`)
+xya$`obj$fibroblast_subclusters` <- as.character(xya$`obj$fibroblast_subclusters`)
 
-xy$relabeled <- xy$`obj$epi.cytoTRACE_0.72`
-xy$relabeled <- as.factor(xy$relabeled)
+xya$`obj$epi.cytoTRACE_0.72`[is.na(xya$`obj$epi.cytoTRACE_0.72`)] <- xya$`obj$subclusters`[is.na(xya$`obj$epi.cytoTRACE_0.72`)]
+xya$`obj$fibroblast_subclusters`[is.na(xya$`obj$fibroblast_subclusters`)] <- xya$`obj$epi.cytoTRACE_0.72`[is.na(xya$`obj$fibroblast_subclusters`)]
 
-xy$relabeled <- recode_factor(xy$relabeled,
+xya$subclusters <- xya$`fibroblast_subclusters`
+
+xya$subclusters <- as.factor(xya$`obj$fibroblast_subclusters`)
+
+xya$subclusters <- recode_factor(xya$subclusters,
                               positive = "Epithelial_Cancer",
                               negative = "Epithelial_Normal")
+#create a dataframe containing all subcluster information to add to seurat object metadata
+xya_rm <- subset(xya, select = -c(1,2,3)) # removing first 3 column so not accidentally overwriting original annotations from that original slot
 
-xy_rm <- subset(xy, select = -c(1,2)) # removing first two column so not accidentally overwriting original annotations from that original slot
+obj <- AddMetaData(obj, metadata = xya_rm)
 
-obj <- AddMetaData(obj, metadata = xy_rm)
-
+plot(getSankey(obj$Expanded_labels, obj$subclusters)) # check that idents are aligned
 ```
 
 ```{r CellChat analysis: AdjNorm samples}
@@ -1752,12 +1895,52 @@ obj <- AddMetaData(obj, metadata = xy_rm)
 options(stringsAsFactors = FALSE)
 options(future.globals.maxSize= 1000*1024^2)
 
+# subset original object to assess L-R interactions between NK cell, epithelial cell, and fibroblast subpopulations
+Idents(obj) <- obj$subclusters
+levels(Idents(obj))
+obj_NK_epi_fib <- subset(obj, idents = c("Epithelial_Cancer",
+                                         "Epithelial_Normal",
+                                         "apCAF",
+                                         "Fibroblasts_Normal",
+                                         "iCAF",
+                                         "myCAF",
+                                         "NK Cells",
+                                         "Stellate-like CAF"))
+obj_all_subclusters <- obj
+obj <- obj_NK_epi_fib
+
 Idents(obj) <- obj$DiseaseState
 AdjNorm <- subset(obj, idents = "AdjNorm")
-Idents(AdjNorm) <- AdjNorm$relabeled
-levels(AdjNorm$relabeled)
-cellchat_AdjNorm <- createCellChat(AdjNorm, group.by = "relabeled", assay = "RNA") # create CellChat object
+Idents(AdjNorm) <- AdjNorm$subclusters
+levels(AdjNorm$subclusters)
+cellchat_AdjNorm <- createCellChat(AdjNorm, group.by = "subclusters", assay = "RNA") # create CellChat object
+levels(cellchat_AdjNorm@idents) # check that there are no missing idents and drop any unused levels
+AdjNorm$subclusters <- ordered(AdjNorm$subclusters, levels = c("NK Cells",
+                                                         "Epithelial_Cancer",
+                                                         "Epithelial_Normal",
+                                                         "Stellate-like CAF",
+                                                         "iCAF",
+                                                         "Fibroblasts_Normal",
+                                                         "myCAF",
+                                                         "apCAF",
+                                                         "Acinar",
+                                                         "B Cells",
+                                                         "CD4 T Cells",
+                                                         "CD8 T Cells",
+                                                         "Dendritic Cell",
+                                                         "Endocrine",
+                                                         "Endothelial",
+                                                         "Granulocyte",
+                                                         "Macrophage",
+                                                         "Mast Cells",
+                                                         "Pericytes",
+                                                         "Plasma Cells",
+                                                         "T Reg"))
+
+cellchat_AdjNorm <- CellChat::createCellChat(AdjNorm, group.by = "subclusters", assay = "RNA") # create CellChat object
 cellchat_AdjNorm@idents
+unique(cellchat_AdjNorm@idents)
+levels(cellchat_AdjNorm@idents)
 
 cellchat <- cellchat_AdjNorm
 
@@ -1773,46 +1956,61 @@ CellChatDB$cofactor <- cofactor_input
 CellChatDB$geneInfo <- geneInfo
 # use all CellChatDB for cell-cell communication analysis
 CellChatDB.use <- CellChatDB # simply use the default CellChatDB
-length(unique(cellchat@DB$interaction$pathway_name))
-# set the used database in the object
+# set the used CellChat database in the object
 cellchat@DB <- CellChatDB.use
+length(unique(cellchat@DB$interaction$pathway_name))
+
 # subset the expression data of signaling genes for saving computation cost
 cellchat <- CellChat::subsetData(object = cellchat) # This step is necessary even if using the whole database
+#check that there are no unused levels
+levels(cellchat@idents)
+cellchat@idents <- droplevels(cellchat@idents, c("Acinar",
+                                                 "B Cells",
+                                                 "CD4 T Cells",
+                                                 "CD8 T Cells",
+                                                 "Dendritic Cell",
+                                                 "Endocrine",
+                                                 "Endothelial",
+                                                 "Granulocyte",
+                                                 "Macrophage",
+                                                 "Mast Cells",
+                                                 "Pericytes",
+                                                 "Plasma Cells",
+                                                 "T Reg"))
 
 future::plan("multisession", workers = 4) # do parallel
 
 # run necessary CellChat functions for analysis and downstream visualizations
-cellchat <- identifyOverExpressedGenes(cellchat)
-cellchat <- identifyOverExpressedInteractions(cellchat)
-cellchat <- computeCommunProb(cellchat)
-# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
-cellchat <- filterCommunication(cellchat, min.cells = 10)
-# Extract the inferred cellular communication network as a data frame
-df.net_LR <- subsetCommunication(cellchat) 
-df.net_SIG <- subsetCommunication(cellchat, slot.name = "netP") 
+cellchat <- CellChat::identifyOverExpressedGenes(cellchat)
+cellchat <- CellChat::identifyOverExpressedInteractions(cellchat)
+cellchat <- CellChat::computeCommunProb(cellchat)
 
-cellchat <- computeCommunProbPathway(cellchat)
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellchat <- CellChat::filterCommunication(cellchat, min.cells = 10)
+# Extract the inferred cellular communication network as a data frame
+df.net_LR_AdjNorm <- CellChat::subsetCommunication(cellchat) 
+df.net_SIG_AdjNorm <- CellChat::subsetCommunication(cellchat, slot.name = "netP") 
+
+cellchat <- CellChat::computeCommunProbPathway(cellchat)
 cellchat@netP$prob
-cellchat <- aggregateNet(cellchat)
-cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") 
+cellchat <- CellChat::aggregateNet(cellchat)
+cellchat <- CellChat::netAnalysis_computeCentrality(cellchat, slot.name = "netP") 
 
 library(ggalluvial)
+library(ggplot2)
+library(NMF)
 
 selectK(cellchat, pattern = "outgoing")
-nPatterns = 2
+nPatterns = 3
 cellchat <- identifyCommunicationPatterns(cellchat, pattern = "outgoing", k = nPatterns, height = 20)
 
 selectK(cellchat, pattern = "incoming")
-nPatterns = 3
+nPatterns = 2
 cellchat <- identifyCommunicationPatterns(cellchat, pattern = "incoming", k = nPatterns, height = 20)
 
 cellchat <- computeNetSimilarity(cellchat, type = "functional")
 cellchat <- netEmbedding(cellchat, type = "functional")
 cellchat <- netClustering(cellchat, type = "functional") # may have to use trace(netClustering, edit = T) to change "multicore" to "multisession" to run this function
-
-cellchat <- computeNetSimilarity(cellchat, type = "structural")
-cellchat <- netEmbedding(cellchat, type = "structural")
-cellchat <- netClustering(cellchat, type = "structural")
 
 cellchat_AdjNorm <- cellchat
 ```
@@ -1825,32 +2023,54 @@ cellchat_AdjNorm <- cellchat
 # read in Seurat object and subset PDAC samples for CellChat analysis
 Idents(obj) <- obj$DiseaseState
 PDAC <- subset(obj, idents = "PDAC")
-Idents(PDAC) <- PDAC$relabeled
-levels(PDAC$relabeled)
-cellchat_PDAC <- createCellChat(PDAC, group.by = "relabeled", assay = "RNA") # create CellChat object
+Idents(PDAC) <- PDAC$subclusters
+levels(PDAC$subclusters)
+
+PDAC$subclusters <- ordered(PDAC$subclusters, levels = c("NK Cells",
+                                                         "Epithelial_Cancer",
+                                                         "Epithelial_Normal",
+                                                         "Stellate-like CAF",
+                                                         "iCAF",
+                                                         "Fibroblasts_Normal",
+                                                         "myCAF",
+                                                         "apCAF",
+                                                         "Acinar",
+                                                         "B Cells",
+                                                         "CD4 T Cells",
+                                                         "CD8 T Cells",
+                                                         "Dendritic Cell",
+                                                         "Endocrine",
+                                                         "Endothelial",
+                                                         "Granulocyte",
+                                                         "Macrophage",
+                                                         "Mast Cells",
+                                                         "Pericytes",
+                                                         "Plasma Cells",
+                                                         "T Reg"))
+
+cellchat_PDAC <- CellChat::createCellChat(PDAC, group.by = "subclusters", assay = "RNA") # create CellChat object
 cellchat_PDAC@idents
 
 cellchat <- cellchat_PDAC
+cellchat@idents <- droplevels(cellchat@idents, c("Acinar",
+                                                 "B Cells",
+                                                 "CD4 T Cells",
+                                                 "CD8 T Cells",
+                                                 "Dendritic Cell",
+                                                 "Endocrine",
+                                                 "Endothelial",
+                                                 "Granulocyte",
+                                                 "Macrophage",
+                                                 "Mast Cells",
+                                                 "Pericytes",
+                                                 "Plasma Cells",
+                                                 "T Reg"))
 
-# set up the CellChat database
-interaction_input <- read.csv(file = 'interaction_input_CellChatDB_updated.csv', row.names = 1)
-complex_input <- read.csv(file = 'complex_input_CellChatDB.csv', row.names = 1)
-cofactor_input <- read.csv(file = 'cofactor_input_CellChatDB.csv', row.names = 1)
-geneInfo <- read.csv(file = 'geneInfo_input_CellChatDB.csv', row.names = 1)
-CellChatDB <- list()
-CellChatDB$interaction <- interaction_input
-CellChatDB$complex <- complex_input
-CellChatDB$cofactor <- cofactor_input
-CellChatDB$geneInfo <- geneInfo
-# use all CellChatDB for cell-cell communication analysis
-CellChatDB.use <- CellChatDB # simply use the default CellChatDB
-length(unique(cellchat@DB$interaction$pathway_name))
-# set the used database in the object
+# set the used Cellchat database in the object
 cellchat@DB <- CellChatDB.use
+length(unique(cellchat@DB$interaction$pathway_name))
 # subset the expression data of signaling genes for saving computation cost
 cellchat <- CellChat::subsetData(object = cellchat) # This step is necessary even if using the whole database
-
-future::plan("multisession", workers = 4) # do parallel
 
 # run necessary CellChat functions for analysis and downstream visualizations
 cellchat <- identifyOverExpressedGenes(cellchat)
@@ -1859,15 +2079,13 @@ cellchat <- computeCommunProb(cellchat)
 # Filter out the cell-cell communication if there are only few number of cells in certain cell groups
 cellchat <- filterCommunication(cellchat, min.cells = 10)
 # Extract the inferred cellular communication network as a data frame
-df.net_LR <- subsetCommunication(cellchat) 
-df.net_SIG <- subsetCommunication(cellchat, slot.name = "netP") 
+df.net_LR_PDAC <- subsetCommunication(cellchat) 
+df.net_SIG_PDAC <- subsetCommunication(cellchat, slot.name = "netP") 
 
 cellchat <- computeCommunProbPathway(cellchat)
 cellchat@netP$prob
 cellchat <- aggregateNet(cellchat)
 cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") 
-
-library(ggalluvial)
 
 selectK(cellchat, pattern = "outgoing")
 nPatterns = 2
@@ -1880,10 +2098,6 @@ cellchat <- identifyCommunicationPatterns(cellchat, pattern = "incoming", k = nP
 cellchat <- computeNetSimilarity(cellchat, type = "functional")
 cellchat <- netEmbedding(cellchat, type = "functional")
 cellchat <- netClustering(cellchat, type = "functional") 
-
-cellchat <- computeNetSimilarity(cellchat, type = "structural")
-cellchat <- netEmbedding(cellchat, type = "structural")
-cellchat <- netClustering(cellchat, type = "structural")
 
 cellchat_PDAC <- cellchat
 ```
@@ -1901,60 +2115,87 @@ cellchat_AdjNorm <- updateCellChat(cellchat_AdjNorm)
 cellchat_PDAC <- netAnalysis_computeCentrality(cellchat_PDAC)
 cellchat_AdjNorm <- netAnalysis_computeCentrality(cellchat_AdjNorm)
 
+weight.max <- getMaxWeight(object.list, attribute = c("idents","count"))
+
+group.new = c("NK Cells",
+              "Epithelial_Cancer",
+              "Epithelial_Normal",
+              "Stellate-like CAF",
+              "iCAF",
+              "Fibroblasts_Normal",
+              "myCAF",
+              "apCAF")
+
+cellchat_AdjNorm <- liftCellChat(cellchat_AdjNorm, group.new)
+cellchat_PDAC <- liftCellChat(cellchat_PDAC, group.new)
+
 object.list <- list(AdjNorm = cellchat_AdjNorm,
                     PDAC = cellchat_PDAC)
 
-cellchat <- mergeCellChat(object.list, add.names = names(object.list), merge.data = T, cell.prefix = T) 
+cellchat <- mergeCellChat(object.list, add.names = names(object.list), merge.data = T)
 
-gg1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
-gg2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2), measure = "weight")
+# liftCellChat() and mergeCellChat() functions scramble the names of the cell identies in the cellchat@idents$joint factor. Renaming the cell names based on the Seurat object they were derived from
+cc_meta <- as.data.frame(cellchat@idents$joint)
+cc_meta$rownames <- rownames(obj@meta.data)
+cc_meta$subclusters <- obj@meta.data$subclusters
+rownames(cc_meta) <- cc_meta$rownames
+cc_meta <- cc_meta[,2:3]
+str(cc_meta) # confirm subclusters are factors
+first_factor <- cc_meta$subclusters
+first_factor <- droplevels(first_factor, c("Acinar",
+                                           "B Cells",
+                                           "CD4 T Cells",
+                                           "CD8 T Cells",
+                                           "Dendritic Cell",
+                                           "Endocrine",
+                                           "Endothelial",
+                                           "Granulocyte",
+                                           "Macrophage",
+                                           "Mast Cells",
+                                           "Pericytes",
+                                           "Plasma Cells",
+                                           "T Reg"))
+names(first_factor) <- rownames(cc_meta)
+cellchat@idents$joint <- first_factor
+
+levels(cellchat@idents$PDAC)
+levels(cellchat@idents$AdjNorm)
+levels(cellchat@idents$joint)
+
+cellchat@idents$joint <- ordered(cellchat@idents$joint, levels = c("NK Cells",
+                                                         "Epithelial_Cancer",
+                                                         "Epithelial_Normal",
+                                                         "Stellate-like CAF",
+                                                         "iCAF",
+                                                         "Fibroblasts_Normal",
+                                                         "myCAF",
+                                                         "apCAF"))
+
+##confirmatory Sankey plots to show that cell identities align
+plot(getSankey(PDAC$subclusters, cellchat@idents$PDAC))
+plot(getSankey(AdjNorm$subclusters, cellchat@idents$AdjNorm))
+plot(getSankey(obj$subclusters, cellchat@idents$joint))
 
 weight.max <- getMaxWeight(object.list, attribute = c("idents","count"))
-
-# Differential number of interactions or interaction strength among different cell types
-group.cellType <- c(rep("NK Cells", 1), 
-                    rep("Epithelial_Cancer", 1), 
-                    rep("Epithelial_Normal", 1), 
-                    rep("Fibroblast", 1))
-group.cellType <- factor(group.cellType, levels = c("NK Cells", 
-                                                    "Epithelial_Cancer", 
-                                                    "Epithelial_Normal", 
-                                                    "Fibroblast"))
-object.list <- lapply(object.list, function(x) {mergeInteractions(x, group.cellType)}) 
-cellchat <- mergeCellChat(object.list, add.names = names(object.list))
 
 cellchat <- computeNetSimilarityPairwise(cellchat, type = "functional")
 cellchat <- netEmbedding(cellchat, type = "functional")
 cellchat <- netClustering(cellchat, type = "functional")
-
-cellchat <- computeNetSimilarityPairwise(cellchat, type = "structural")
-cellchat <- netEmbedding(cellchat, type = "structural")
-cellchat <- netClustering(cellchat, type = "structural")
 
 rankSimilarity(cellchat, type = "functional")
 
 pos.dataset = "PDAC"
 features.name = pos.dataset
 cellchat <- identifyOverExpressedGenes(cellchat, group.dataset = "datasets", pos.dataset = pos.dataset, features.name = features.name, only.pos = FALSE, thresh.pc = 0.1, thresh.fc = 0.1, thresh.p = 1)
-net <- netMappingDEG(cellchat, features.name = features.name)
-net.up <- subsetCommunication(cellchat, net = net, datasets = "PDAC",ligand.logFC = 0.2, receptor.logFC = NULL)
+net <- netMappingDEG(cellchat, features.name = features.name, thresh = 0.05)
+net.up <- subsetCommunication(cellchat, net = net, datasets = "PDAC", ligand.logFC = 0.2, receptor.logFC = 0.2)
 net.down <- subsetCommunication(cellchat, net = net, datasets = "AdjNorm",ligand.logFC = -0.1, receptor.logFC = -0.1)
 
 gene.up <- extractGeneSubsetFromPair(net.up, cellchat)
 gene.down <- extractGeneSubsetFromPair(net.down, cellchat)
-
-pairLR.use.up = net.up[, "interaction_name", drop = F]
-gg1 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.up, sources.use = c(1:4), targets.use = c(1:4), comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Up-regulated signaling in ", names(object.list)[2]))
-pairLR.use.down = net.down[, "interaction_name", drop = F]
-gg2 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.down, sources.use = c(1:4), targets.use = c(1:4), comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Down-regulated signaling in ", names(object.list)[2]))
-
-computeEnrichmentScore(net.down, scecies = 'human')
-
-up_ES_no_NA <- na.omit(net.up)
-computeEnrichmentScore(up_ES_no_NA, scecies = 'human')
 ```
 
-```{r Figure 4A}
+```{r Figure 5A}
 object.list = list(PDAC = cellchat_PDAC,
                    AdjNorm = cellchat_AdjNorm)
 
@@ -1968,126 +2209,223 @@ gg[[i]] <- netAnalysis_signalingRole_scatter(object.list[[i]], title = names(obj
 num.link <- sapply(object.list, function(x) {rowSums(x@net$count) + colSums(x@net$count)-diag(x@net$count)})
 x <- Reduce(rbind, lapply(gg, function(g){g[["data"]]}))
 View(x)
-x$DiseaseState <- c("PDAC", "PDAC", "PDAC", "PDAC", "AdjNorm", "AdjNorm", "AdjNorm", "AdjNorm")
+x$DiseaseState <- c("PDAC", "PDAC", "PDAC", "PDAC", "PDAC", "PDAC", "PDAC", "PDAC",
+                    "AdjNorm", "AdjNorm", "AdjNorm", "AdjNorm", "AdjNorm", "AdjNorm", "AdjNorm")
+
+x$labels <- ordered(x$labels, levels = c("NK Cells",
+                                         "Epithelial_Cancer",
+                                         "Epithelial_Normal",
+                                         "Stellate-like CAF",
+                                         "iCAF",
+                                         "Fibroblasts_Normal",
+                                         "myCAF",
+                                         "apCAF"))
 
 function (object, signaling = NULL, color.use = NULL, slot.name = "netP", 
           group = NULL, weight.MinMax = NULL, dot.size = c(2, 6), point.shape = c(21, 22, 24, 23, 25, 8, 3), label.size = 3, dot.alpha = 0.6, 
           x.measure = "outdeg", y.measure = "indeg", xlabel = "Outgoing interaction strength", 
           ylabel = "Incoming interaction strength", title = NULL, font.size = 10, 
-          font.size.title = 10, do.label = T, show.legend = T, show.axes = T)
+          font.size.title = 10, do.label = T, show.legend = T, show.axes = T){
   
 font.size = 10
 xlabel = "Outgoing interaction strength"
 ylabel = "Incoming interaction strength"
-color.use <- scPalette(4) # change based on levels of object
-color.use # can use the codes to rearrage the order of the colors if interested
-color.use <-c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3")
-color.use <- scPalette(4)
+color.use <- scPalette(length(levels(cellchat@idents$joint)))
+color.use }
 
 ggplot(data = x, aes(x, y)) + 
-  geom_point(aes(size = Count,
-                 colour = labels, 
-                 fill = labels, 
-                 shape = DiseaseState)) + 
-  scale_colour_manual(values = color.use) + 
-  CellChat_theme_opts() + 
-  theme(text = element_text(size = font.size), 
-        legend.key.height = grid::unit(0.15, "in")) + 
-  labs(x = xlabel, y = ylabel) + 
-  theme(axis.line.x = element_line(size = 0.25), 
-        axis.line.y = element_line(size = 0.25))
+    geom_point(aes(size = Count,
+                   colour = labels, 
+                   fill = labels, 
+                   shape = DiseaseState)) + 
+    scale_colour_manual(values = color.use) + 
+    CellChat_theme_opts() + 
+    theme(text = element_text(size = font.size), 
+          legend.key.height = grid::unit(0.15, "in")) + 
+    labs(x = xlabel, y = ylabel) + 
+    theme(axis.line.x = element_line(size = 0.25), 
+          axis.line.y = element_line(size = 0.25)) + 
+  geom_text(aes(label = labels))
 ```
 
-```{r Figure 4B}
+```{r Figure 5B}
+netVisual_heatmap_edit <- function (object, comparison = c(1, 2), measure = c("count", 
+    "weight"), signaling = NULL, slot.name = c("netP", "net"), 
+    color.use = NULL, color.heatmap = c("#2166ac", "#b2182b"), 
+    title.name = NULL, width = NULL, height = NULL, font.size = 8, 
+    font.size.title = 10, cluster.rows = FALSE, cluster.cols = FALSE, 
+    sources.use = NULL, targets.use = NULL, remove.isolate = FALSE, 
+    row.show = NULL, col.show = NULL) 
+{
+    if (!is.null(measure)) {
+        measure <- match.arg(measure)
+    }
+    slot.name <- match.arg(slot.name)
+    if (is.list(object@net[[1]])) {
+        message("Do heatmap based on a merged object \n")
+        obj1 <- object@net[[comparison[1]]][[measure]]
+        obj2 <- object@net[[comparison[2]]][[measure]]
+        net.diff <- obj2 - obj1
+        if (measure == "count") {
+            if (is.null(title.name)) {
+                title.name = "Differential number of interactions"
+            }
+        }
+        else if (measure == "weight") {
+            if (is.null(title.name)) {
+                title.name = "Differential interaction strength"
+            }
+        }
+        legend.name = "Relative values"
+    }
+    else {
+        message("Do heatmap based on a single object \n")
+        if (!is.null(signaling)) {
+            net.diff <- slot(object, slot.name)$prob[, , signaling]
+            if (is.null(title.name)) {
+                title.name = paste0(signaling, " signaling network")
+            }
+            legend.name <- "Communication Prob."
+        }
+        else if (!is.null(measure)) {
+            net.diff <- object@net[[measure]]
+            if (measure == "count") {
+                if (is.null(title.name)) {
+                  title.name = "Number of interactions"
+                }
+            }
+            else if (measure == "weight") {
+                if (is.null(title.name)) {
+                  title.name = "Interaction strength"
+                }
+            }
+            legend.name <- title.name
+        }
+    }
+    net <- net.diff
+    if ((!is.null(targets.use)) | (!is.null(sources.use))) {
+        df.net <- reshape2::melt(net, value.name = "value")
+        colnames(df.net)[1:2] <- c("source", "target")
+        if (!is.null(sources.use)) {
+            if (is.numeric(sources.use)) {
+                sources.use <- rownames(net.diff)[sources.use]
+            }
+            df.net <- subset(df.net, source %in% sources.use)
+        }
+        if (!is.null(targets.use)) {
+            if (is.numeric(targets.use)) {
+                targets.use <- rownames(net.diff)[targets.use]
+            }
+            df.net <- subset(df.net, target %in% targets.use)
+        }
+        cells.level <- rownames(net.diff)
+        df.net$source <- factor(df.net$source, levels = cells.level)
+        df.net$target <- factor(df.net$target, levels = cells.level)
+        df.net$value[is.na(df.net$value)] <- 0
+        net <- tapply(df.net[["value"]], list(df.net[["source"]], 
+            df.net[["target"]]), sum)
+    }
+    net[is.na(net)] <- 0
+    if (remove.isolate) {
+        idx1 <- which(Matrix::rowSums(net) == 0)
+        idx2 <- which(Matrix::colSums(net) == 0)
+        idx <- intersect(idx2, idx1)
+        if (length(idx) > 0) {
+            net <- net[-idx, ]
+            net <- net[, -idx]
+        }
+    }
+    mat <- net
+    mat <- t(mat)
+    if (is.null(color.use)) {
+        color.use <- scPalette(length(1:(ncol(mat))))
+        names(color.use) <- NULL
+    }
+    names(color.use) <- colnames(mat)
+    if (!is.null(row.show)) {
+        mat <- mat[row.show, ]
+    }
+    if (!is.null(col.show)) {
+        mat <- mat[, col.show]
+        color.use <- color.use[col.show]
+    }
+    if (min(mat) < 0) {
+        color.heatmap.use = colorRamp3(c(min(mat), 0, max(mat)), 
+            c(color.heatmap[1], "#f7f7f7", color.heatmap[2]))
+        colorbar.break <- c(round(min(mat, na.rm = T), digits = nchar(sub(".*\\.(0*).*", 
+            "\\1", min(mat, na.rm = T))) + 1), 0, round(max(mat, 
+            na.rm = T), digits = nchar(sub(".*\\.(0*).*", "\\1", 
+            max(mat, na.rm = T))) + 1))
+    }
+    else {
+        if (length(color.heatmap) == 3) {
+            color.heatmap.use = colorRamp3(c(0, min(mat), max(mat)), 
+                color.heatmap)
+        }
+        else if (length(color.heatmap) == 2) {
+            color.heatmap.use = colorRamp3(c(min(mat), max(mat)), 
+                color.heatmap)
+        }
+        else if (length(color.heatmap) == 1) {
+            color.heatmap.use = (grDevices::colorRampPalette((RColorBrewer::brewer.pal(n = 9, 
+                name = color.heatmap))))(100)
+        }
+        colorbar.break <- c(round(min(mat, na.rm = T), digits = nchar(sub(".*\\.(0*).*", 
+            "\\1", min(mat, na.rm = T))) + 1), round(max(mat, 
+            na.rm = T), digits = nchar(sub(".*\\.(0*).*", "\\1", 
+            max(mat, na.rm = T))) + 1))
+    }
+    df <- data.frame(group = colnames(mat))
+    rownames(df) <- colnames(mat)
+    col_annotation <- HeatmapAnnotation(df = df, col = list(group = color.use), 
+        which = "column", show_legend = FALSE, show_annotation_name = FALSE, 
+        simple_anno_size = grid::unit(0.2, "cm"))
+    row_annotation <- HeatmapAnnotation(df = df, col = list(group = color.use), 
+        which = "row", show_legend = FALSE, show_annotation_name = FALSE, 
+        simple_anno_size = grid::unit(0.2, "cm"))
+    ha1 = rowAnnotation(Strength = anno_barplot(rowSums(abs(mat)), 
+        border = FALSE, gp = gpar(fill = color.use, col = color.use)), 
+        show_annotation_name = FALSE)
+    ha2 = HeatmapAnnotation(Strength = anno_barplot(colSums(abs(mat)), 
+        border = FALSE, gp = gpar(fill = color.use, col = color.use)), 
+        show_annotation_name = FALSE)
+    if (sum(abs(mat) > 0) == 1) {
+        color.heatmap.use = c("white", color.heatmap.use)
+    }
+    else {
+        mat[mat == 0] <- NA
+    }
+    ht1 = Heatmap(mat, col = color.heatmap.use, na_col = "white", 
+        name = legend.name, bottom_annotation = col_annotation, 
+        left_annotation = row_annotation, top_annotation = ha2, 
+        right_annotation = ha1, cluster_rows = cluster.rows, 
+        cluster_columns = cluster.rows, row_names_side = "left", 
+        row_names_rot = 0, row_names_gp = gpar(fontsize = font.size), 
+        column_names_gp = gpar(fontsize = font.size), column_title_gp = gpar(fontsize = font.size.title), 
+        column_names_rot = 90, column_title = "Sources (Sender)", 
+        row_title = "Targets (Receiver)", row_title_gp = gpar(fontsize = font.size.title), 
+        row_title_rot = 90, heatmap_legend_param = list(title_gp = gpar(fontsize = 8, 
+            fontface = "plain"), title_position = "leftcenter-rot", 
+            border = NA, legend_height = unit(20, "mm"), labels_gp = gpar(fontsize = 8), 
+            grid_width = unit(2, "mm")))
+    return(ht1)
+}
+
+netVisual_heatmap_edit(cellchat, measure = "weight")
+```
+
+```{r Figure 5C}
 levels(cellchat@idents$joint) # identify levels for cell types to choose approriate sources and targets
-rankNet(cellchat, mode = "comparison", stacked = F, do.stat = TRUE, sources.use = c(1,3), targets.use = c(4))
+rankNet(cellchat, mode = "comparison", stacked = F, do.stat = TRUE, sources.use = c(2,4,5,7,8), targets.use = c(1))
 ```
 
-```{r Figure 4C}
-netVisual_bubble(cellchat, sources.use = c(1:4), targets.use = c(4), comparison = c(1, 2),  angle.x = 45, remove.isolate = T, signaling = c("COLLAGEN", "FN1", "LAMININ"))
-```
-
-```{r Figure 4D-G}
-Idents(obj) <- obj@meta.data$relabeled
-DefaultAssay(obj) <- "RNA"
-# Determine which genes from the identified L-R pairs are up- or down-regulated in epithelial cells, fibroblasts, and NK cells between disease states using the FindMarkers() function
-features <- c("CD44",              
-              "COL1A1",
-              "COL1A2",             
-              "COL4A1",
-              "COL4A2",
-              "COL6A1",
-              "COL6A2",
-              "COL6A3",
-              "COL9A3",
-              "FN1",
-              "ITGA4",
-              "ITGB1",
-              "ITGB7",
-              "LAMA2",
-              "LAMA3",
-              "LAMA4",
-              "LAMA5",
-              "LAMB1",
-              "LAMB2",
-              "LAMB3",
-              "LAMC1",
-              "LAMC2") 
-
-deg_NK <- FindMarkers(obj, 
-                      ident.1 = "PDAC", 
-                      ident.2 = "AdjNorm",
-                      group.by = "DiseaseState", 
-                      verbose = TRUE, 
-                      subset.ident = "NK Cells", 
-                      features = features)
-
-deg_epi <- FindMarkers(obj, 
-                      ident.1 = "PDAC", 
-                      ident.2 = "AdjNorm",
-                      group.by = "DiseaseState", 
-                      verbose = TRUE, 
-                      subset.ident = "Epithelial_Normal", 
-                      features = features)
-
-deg_epi_can <- FindMarkers(obj, 
-                      ident.1 = "PDAC", 
-                      ident.2 = "AdjNorm",
-                      group.by = "DiseaseState", 
-                      verbose = TRUE, 
-                      subset.ident = "Epithelial_Cancer", 
-                      features = features)
-
-deg_fib <- FindMarkers(obj, 
-                      ident.1 = "PDAC", 
-                      ident.2 = "AdjNorm",
-                      group.by = "DiseaseState", 
-                      verbose = TRUE, 
-                      subset.ident = "Fibroblast", 
-                      features = features)
-
-# Plot differentially expressed genes from each cell population with an adjusted p-value < 0.01
-Idents(obj) <- obj$relabeled
-epi_can <- subset(obj, idents = "Epithelial_Cancer")
-Idents(epi_can) <- epi_can$DiseaseState
-VlnPlot(epi_can, features = c("CD44"), ncol = 2, pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
-
-epi <- subset(obj, idents = "Epithelial_Normal")
-Idents(epi) <- epi$DiseaseState
-VlnPlot(epi, features = c("CD44"), pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
-
-fib <- subset(obj, idents = "Fibroblast")
-Idents(fib) <- fib$DiseaseState
-VlnPlot(fib, features = c("CD44"), ncol = 4, pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
-
-NK <- subset(obj, idents = "NK Cells")
-Idents(NK) <- NK$DiseaseState
-VlnPlot(NK, features = c("CD44"), pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+```{r Figure 5D}
+netVisual_bubble(cellchat, sources.use = c(2,4,5,7,8), targets.use = c(1), comparison = c(1, 2),  angle.x = 45, remove.isolate = T, signaling = c("COLLAGEN"))
 ```
 
 # Supplementary Figures
 ## Supplementary Figure S1
-```{r Supplementary Figure S1}
+```{r Supplementary Figure S1A}
 # averaged heatmap of all cell subclusters with all IMC markers
 features <- c("pankeratin", 
               "Ecadherin", 
@@ -2127,15 +2465,45 @@ subcluster_mean <- aggregateAcrossCells(as(sce, "SingleCellExperiment"),
                                       statistics = "mean",
                                       use.assay.type = "logcounts")
 
-dittoHeatmap(subcluster_mean, 
-             annot.by = "subcluster", 
-             cluster_rows = F, 
-             features = features,
-             heatmap.colors = colorRampPalette(c("#67001F", "#F7F7F7", "#053061"))(50))
+mat <- subcluster_mean@assays@data@listData[["logcounts"]][sort(rownames(subcluster_mean@assays@data@listData[["logcounts"]])), sort(colnames(subcluster_mean@assays@data@listData[["logcounts"]]))]
+
+pheatmap(mat, cluster_cols = F, cluster_rows = F, scale = "row", color = colorRampPalette(c("#053061", "#F7F7F7", "#67001F"))(50))
 ```
 
-## Supplementary Figure S2
-```{r Supplementary Figure S2}
+```{r Supplementary Figure S1B}
+dittoBarPlot(PDAC,
+             "subcluster",
+             group.by = "Case_Number")
+```
+
+## Supplementary Figure S3
+```{r Supplementary Figure S3A}
+sce <- "PDAC_sce.RDS" # load in SingleCellExperiment object of annotated IMC single cell data from PDAC patients
+
+
+sce <- buildSpatialGraph(sce, img_id = "ImageId", type = "knn", k = 15, coords = c("X_position", "Y_position"))
+
+sce <- aggregateNeighbors(sce, colPairName = "knn_interaction_graph", 
+                          aggregate_by = "metadata", count_by = "subcluster")
+
+set.seed(220705)
+
+cn_1 <- kmeans(sce$aggregatedNeighbors, centers = 8) # can adjust the number of neighbors here
+sce$cn_subcluster <- as.factor(cn_1$cluster)
+
+for_plot <- colData(sce) %>% as_tibble() %>%
+  group_by(cn_subcluster, subcluster) %>%
+  dplyr::summarize(count = n(), .groups = "drop") %>%
+  mutate(freq = count / sum(count)) %>%
+  pivot_wider(id_cols = cn_subcluster, names_from = subcluster, 
+              values_from = freq, values_fill = 0) %>%
+  ungroup() %>%
+  select(-cn_subcluster)
+
+pheatmap(for_plot, color = colorRampPalette(c("darkblue", "white", "darkred"))(100), scale = "column", legend = T, labels_row = row.names(for_plot))
+```
+
+```{r Supplementary Figure S3B}
 # CN spatial plots per IMC image
 S2 <- plotSpatial(sce, 
                   node_color_by = "cn_subcluster", 
@@ -2145,63 +2513,84 @@ S2 <- plotSpatial(sce,
 S2 # view the plots
 ```
 
-## Supplementary Figure S3
-```{r Supplementary Figure S3}
-SF3 <- colData(sce) %>% as_tibble() %>%
+## Supplementary Figure S4
+```{r Supplementary Figure S4}
+SF4 <- colData(sce) %>% as_tibble() %>%
   group_by(cn_subcluster, subcluster) %>%
   dplyr::summarize(count = n(), .groups = "drop")
 
-write.csv(SF3, file = "SF3_df.csv") # open file to graph data in GraphPad Prism
+write.csv(SF4, file = "SF4_df.csv") # open file to graph data in GraphPad Prism
 ```
 
-## Supplementary Figure S7
-```{r Supplementary Figure S7A}
-Idents(obj) <- obj$Collapsed_labels
-length(unique(obj$Collapsed_labels))
-cols <- dittoColors()[1:13]
-DimPlot(obj, cols = cols, order = c("Acinar", "B Cells", "CD4 T Cells", "CD8 T Cells", "Dendritic Cell", "Endocrine", "Endothelial", "Epithelial", "Fibroblast", "Mast Cells", "Myeloid", "NK Cells", "Plasma Cells"))
-
-dim_plot <- DimPlot(obj, cols = dittoColors()[1:13])
-
-dim_plot$data$ident <- factor(x = dim_plot$data$ident, levels = c("Acinar", "B Cells", "CD4 T Cells", "CD8 T Cells", "Dendritic Cell", "Endocrine", "Endothelial", "Epithelial", "Fibroblast", "Mast Cells", "Myeloid", "NK Cells", "Plasma Cells"))
-
-FeaturePlot(epi, features = "results.CytoTRACE")
+## Supplementary Figure S10
+```{r Supplementary Figure S10A}
+Idents(obj) <- obj$Expanded_labels
+length(unique(obj$Expanded_labels))
+dim_plot <- DimPlot(obj, cols = dittoColors()[1:16], ncol = 2)
+dim_plot$data$ident <- factor(x = dim_plot$data$ident, levels = c("Acinar", "B Cells", "CD4 T Cells", "CD8 T Cells", "Dendritic Cell", "Endocrine", "Endothelial", "Epithelial", "Fibroblasts", "Granulocyte", "Macrophage", "Mast Cells", "NK Cells","Pericytes", "Plasma Cells", "T Reg"))
+dim_plot
 ```
 
-```{r Supplementary Figure S7B}
-Idents(epi) <- epi$ID
-DimPlot(epi, reduction = "umap_epi")
-```
-
-```{r Supplementary Figure S7C}
-Idents(epi.integrated) <- epi.integrated$ID
-DimPlot(epi.integrated, reduction = "umap_epi_int")
-```
-
-```{r Supplementary Figure S7D}
-FeaturePlot(epi.integrated, features = "results.CytoTRACE", reduction = "umap_epi_int")
-```
-
-```{r Supplementary Figure S7E}
+```{r Supplementary Figure S10B}
 msEst <- mstep(modelName = "V", data = epi.integrated$results.CytoTRACE, z = epi.integrated$results.CytoTRACE)
 mixmodel <- em(epi.integrated$results.CytoTRACE,"normal","normal")
-hist(epi.integrated$results.CytoTRACE,10,F)  # generates histogram of CytoTRACE scores from integrated epithelial data
+hist(epi.integrated$results.CytoTRACE,100,F, xlab = "CytoTRACE Score")  # generates histogram of CytoTRACE scores from integrated epithelial data
 lines(mixmodel,lwd=1.5,col="red")
 abline(v=msEst$parameters$pro,lty=2,col="blue")
 ```
 
-```{r Supplementary Figure S7F}
-Idents(obj) <- obj$relabeled
+```{r Supplementary Figure S10C}
+CAF_features <- c("COL1A1",   
+                  "FAP",  
+                  "PDPN",
+                  "DCN",
+                  "VIM",
+                  "HLA-DRA",
+                  "HLA-DPA1",
+                  "HLA-DQA1",
+                  "CFD",
+                  "DPT",
+                  "AGTR1",
+                  "CXCL12",
+                  "IL8",
+                  "CCL2",
+                  "ACTA2",
+                  "TAGLN",
+                  "MMP11",
+                  "HOPX",
+                  "POSTN",
+                  "COL12A1",
+                  "THBS2",
+                  "IGFBP3",
+                  "THY1",
+                  "MYH11",
+                  "RGS5")  
 
-dim_plot <- DimPlot(obj, cols = dittoColors()[1:14])
+CAF_features_mean <- aggregateAcrossCells(as(sce, "SingleCellExperiment"),  
+                                      ids = sce$subclusters, 
+                                      statistics = "mean",
+                                      use.assay.type = "logcounts", 
+                                      subset.row = CAF_features)
 
-dim_plot$data$ident <- factor(x = dim_plot$data$ident, levels = c("Acinar", "B Cells", "CD4 T Cells", "CD8 T Cells", "Dendritic Cell", "Endocrine", "Endothelial", "Epithelial_Cancer", "Epithelial_Normal", "Fibroblast", "Mast Cells", "Myeloid", "NK Cells", "Plasma Cells")) # change the order of the factor levels
+mat <- CAF_features_mean@assays@data@listData[["logcounts"]][sort(rownames(CAF_features_mean@assays@data@listData[["logcounts"]])), sort(colnames(CAF_features_mean@assays@data@listData[["logcounts"]]))]
+mat <- mat[,c(2,11,13,16,20)]
+mat <- as.matrix(mat)
+pheatmap(mat, cluster_cols = F, cluster_rows = F, scale = "row", color = colorRampPalette(c("#053061", "#F7F7F7", "#67001F"))(50))
+
+```
+
+```{r Supplementary Figure S10D}
+Idents(obj) <- obj$subclusters
+
+dim_plot <- DimPlot(obj, reduction.use = "umap", cols = dittoColors()[1:21])
+
+dim_plot$data$ident <- factor(x = dim_plot$data$ident, levels = c("Acinar", "B Cells", "CD4 T Cells", "CD8 T Cells", "T Reg", "Dendritic Cell", "Endocrine", "Endothelial", "Epithelial_Cancer", "Epithelial_Normal", "apCAF", "iCAF", "myCAF", "Fibroblasts_Normal", "Stellate-like CAF", "Mast Cells", "Myeloid", "NK Cells", "Pericytes", "Plasma Cells")) # change the order of the factor levels
 
 dim_plot
 ```
 
-```{r Supplementary Figure S7G}
-dittoBarPlot(obj, var = "relabeled", group.by = "ID", split.by = "DiseaseState")
+```{r Supplementary Figure S10E}
+dittoBarPlot(obj, var = "subclusters", group.by = "ID", split.by = "DiseaseState")
 ```
 
 ## Supplementary Figure 8
@@ -2223,4 +2612,94 @@ VlnPlot(epi, features = c("LAMC2"), pt.size = 0, cols = c("#00BFC4", "#F8766D"))
 fib <- subset(obj, idents = "Fibroblast")
 Idents(fib) <- fib$DiseaseState
 VlnPlot(fib, features = rownames(deg_fib), ncol = 4, pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+```
+
+```{r Supplementary Figure S11}
+Idents(obj) <- obj@meta.data$relabeled
+DefaultAssay(obj) <- "RNA"
+# Determine which genes from the identified L-R pairs are up- or down-regulated in epithelial cells, fibroblasts, and NK cells between disease states using the FindMarkers() function
+features <- c("CD44",              
+              "COL1A1",
+              "COL1A2",             
+              "COL4A1",
+              "COL4A2",
+              "COL4A5",
+              "COL6A1",
+              "COL6A2",
+              "COL6A3",
+              "COL9A3") 
+
+deg_NK <- FindMarkers(obj, 
+                      ident.1 = "PDAC", 
+                      ident.2 = "AdjNorm",
+                      group.by = "DiseaseState", 
+                      verbose = TRUE, 
+                      subset.ident = "NK Cells", 
+                      features = features)
+
+deg_epi <- FindMarkers(obj, 
+                       ident.1 = "PDAC", 
+                       ident.2 = "AdjNorm",
+                       group.by = "DiseaseState", 
+                       verbose = TRUE, 
+                       subset.ident = "Epithelial_Normal", 
+                       features = features)
+
+deg_epi_can <- FindMarkers(obj, 
+                           ident.1 = "PDAC", 
+                           ident.2 = "AdjNorm",
+                           group.by = "DiseaseState", 
+                           verbose = TRUE, 
+                           subset.ident = "Epithelial_Cancer", 
+                           features = features)
+
+deg_fib <- FindMarkers(obj, 
+                       ident.1 = "PDAC", 
+                       ident.2 = "AdjNorm",
+                       group.by = "DiseaseState", 
+                       verbose = TRUE, 
+                       subset.ident = "Fibroblasts", 
+                       features = features)
+
+deg_sl_fib <- FindMarkers(obj, 
+                       ident.1 = "PDAC", 
+                       ident.2 = "AdjNorm",
+                       group.by = "DiseaseState", 
+                       verbose = TRUE, 
+                       subset.ident = "Stellate-like CAF", 
+                       features = features)
+
+deg_iCAF <- FindMarkers(obj, 
+                       ident.1 = "PDAC", 
+                       ident.2 = "AdjNorm",
+                       group.by = "DiseaseState", 
+                       verbose = TRUE, 
+                       subset.ident = "iCAF", 
+                       features = features)
+
+deg_myCAF <- FindMarkers(obj, 
+                       ident.1 = "PDAC", 
+                       ident.2 = "AdjNorm",
+                       group.by = "DiseaseState", 
+                       verbose = TRUE, 
+                       subset.ident = "myCAF", 
+                       features = features)
+
+# Plot differentially expressed genes from each cell population with an adjusted p-value < 0.01
+Idents(obj) <- obj$relabeled
+epi_can <- subset(obj, idents = "Epithelial_Cancer")
+Idents(epi_can) <- epi_can$DiseaseState
+VlnPlot(epi_can, features = c("CD44"), ncol = 2, pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+
+epi <- subset(obj, idents = "Epithelial_Normal")
+Idents(epi) <- epi$DiseaseState
+VlnPlot(epi, features = c("CD44"), pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+
+fib <- subset(obj, idents = "Fibroblast")
+Idents(fib) <- fib$DiseaseState
+VlnPlot(fib, features = c("CD44"), ncol = 4, pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
+
+NK <- subset(obj, idents = "NK Cells")
+Idents(NK) <- NK$DiseaseState
+VlnPlot(NK, features = c("CD44"), pt.size = 0, cols = c("#00BFC4", "#F8766D")) + NoLegend()
 ```
